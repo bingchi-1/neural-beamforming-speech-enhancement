@@ -1,0 +1,59 @@
+# 默认配置 —— 对应设计文档 §4「数据管道」
+# 所有随机采样均由 seed 驱动，保证可复现。
+
+seed: 20261009
+
+audio:
+  sample_rate: 16000        # PESQ 宽带模式要求 16 kHz
+  duration: 4.0             # 秒，每条样本时长
+
+# ── 麦克风阵列（设计文档 §4.3）──────────────────────────
+array:
+  type: circular            # circular | linear
+  n_mics: 4
+  radius: 0.04              # 米。4 元圆阵半径
+  # 消融用（加分项，非验收范围）：
+  #   type: linear, n_mics: 8, spacing: 0.04
+
+# ── 房间（设计文档 §4.3）────────────────────────────────
+room:
+  size_range: [3.0, 8.0]    # 米，房间边长随机范围
+  t60_range: [0.2, 0.8]     # 秒，混响时间随机范围
+  source_distance_range: [1.0, 3.0]   # 米，声源到阵列距离
+  source_azimuth_range: [0.0, 360.0]  # 度，方位角随机范围（真值记录，供 Oracle DOA）
+
+# ── 噪声 ────────────────────────────────────────────────
+noise:
+  spatial_coherent: true    # 噪声经 RIR 卷积，模拟空间相干声场（与单通道增强的本质区别）
+  train_snr_range: [-5.0, 10.0]   # 训练时随机 SNR
+  eval_snr_levels: [-5.0, 0.0, 5.0]   # 评估时固定三档
+
+# ── 评估（设计文档 §6.2）────────────────────────────────
+evaluation:
+  t60_levels: [0.3, 0.6]    # 低混响 / 高混响
+  metrics: [pesq_wb, stoi, si_sdr]
+
+# ── 数据（设计文档 §4.1 / §4.2）─────────────────────────
+data:
+  librispeech_root: data/LibriSpeech
+  demand_root: data/DEMAND
+  rir_cache: rirs/          # RIR 预生成缓存，不入库
+  split:
+    train_speakers: 30      # dev-clean 取 30 人
+    val_speakers: 10        # dev-clean 余 10 人
+    test_set: test-clean    # 全部 40 人
+  # 仿真即增广（设计文档 §4.4）：5.4 h 语料 × 20 组房间配置 ≈ 108 h 等效数据
+  room_configs_per_utterance: 20
+
+# ── 训练（W3 起使用，暂留占位）──────────────────────────
+train:
+  batch_size: 4             # 12 GB 显存下可上调，配合梯度累积
+  grad_accum_steps: 4
+  epochs: 100
+  lr: 0.0002
+  optimizer: adamw
+  weight_decay: 0.0001
+  scheduler: cosine
+  amp: true                 # 混合精度
+  grad_clip: 1.0
+  num_workers: 4

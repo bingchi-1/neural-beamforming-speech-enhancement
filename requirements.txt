@@ -1,0 +1,26 @@
+# ── 深度学习框架 ──────────────────────────────────────────────
+# 重要：RTX 50 系（Blackwell, sm_120）必须使用 CUDA 12.8+ 构建的 PyTorch，
+# 且 torch >= 2.7。正确安装方式：
+#
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+#
+# 直接从 PyPI 默认安装会得到 CPU 版（torch.version.cuda 为 None），无法使用 GPU。
+# 验证：python -c "import torch; print(torch.version.cuda, torch.cuda.is_available())"
+torch>=2.7
+torchaudio>=2.7
+
+# ── 数值与音频 I/O ────────────────────────────────────────────
+numpy
+scipy
+soundfile
+
+# ── 阵列与房间仿真 ────────────────────────────────────────────
+pyroomacoustics
+
+# ── 评测指标 ──────────────────────────────────────────────────
+pesq
+pystoi
+
+# ── 工程 ──────────────────────────────────────────────────────
+pyyaml
+pytest
