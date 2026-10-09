@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# 数据与实验产物：体积大，不入库
+data/
+datasets/
+rirs/
+checkpoints/
+runs/
+outputs/
+*.wav
+*.flac
+*.npy
+
+# 工具
+.pytest_cache/
+.coverage
+.DS_Store
+.idea/
+.vscode/
