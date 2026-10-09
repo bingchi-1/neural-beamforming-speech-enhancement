@@ -48,8 +48,15 @@ def _human(n: float) -> str:
 
 
 def download(url: str, dest: Path) -> Path:
-    """下载 url 到 dest，支持断点续传。已完整下载则直接返回。"""
+    """下载 url 到 dest，支持断点续传。
+
+    若 dest 已存在（例如在校内网手动下载后放入），直接使用而不重新下载。
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
+
+    if dest.exists() and dest.stat().st_size > 0:
+        print(f"  发现已有 {dest.name}（{_human(dest.stat().st_size)}），跳过下载")
+        return dest
 
     # 临时文件用于中止后续传；完成后改名
     tmp = dest.with_suffix(dest.suffix + ".part")
