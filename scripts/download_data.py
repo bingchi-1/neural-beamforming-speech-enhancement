@@ -28,8 +28,10 @@ LIBRISPEECH_URLS = {
     "test-clean": "https://www.openslr.org/resources/12/test-clean.tar.gz",
 }
 
-# DEMAND 各环境以独立 zip 发布（Zenodo record 1227121）
-DEMAND_URL = "https://zenodo.org/records/1227121/files/{env}.zip"
+# DEMAND 各环境以独立 zip 发布（Zenodo record 1227121）。
+# 文件名必须带采样率后缀：16 kHz 版本约 80–105 MB，
+# 而 48 kHz 版本是它的三倍，且本项目只需要 16 kHz。
+DEMAND_URL = "https://zenodo.org/records/1227121/files/{env}_16k.zip"
 
 # 设计文档 §4.1 指定的三个环境
 DEFAULT_DEMAND_ENVS = ["DKITCHEN", "DLIVING", "OOFFICE"]
@@ -126,12 +128,20 @@ def fetch_librispeech(subsets: list[str]) -> None:
         extract(archive, target_dir)
 
 
+def _demand_already_extracted(env: str) -> bool:
+    """判断某环境是否已解压。
+
+    压缩包内层目录名可能是 DKITCHEN_16k 或 DKITCHEN，两种都认。
+    """
+    root = DATA_ROOT / "DEMAND"
+    if not root.exists():
+        return False
+    return any(root.glob(f"*{env}*"))
+
+
 def fetch_demand(envs: list[str]) -> None:
     for env in envs:
-        target_dir = DATA_ROOT / "DEMAND"
-        marker = target_dir / env
-
-        if marker.exists():
+        if _demand_already_extracted(env):
             print(f"[DEMAND/{env}] 已存在，跳过")
             continue
 
