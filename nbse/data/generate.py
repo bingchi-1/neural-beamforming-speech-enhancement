@@ -39,6 +39,7 @@ MANIFEST_COLUMNS = [
     "noise_env", "noise_file",
     "snr_target_db", "snr_db", "doa_true", "t60",
     "room_lx", "room_ly", "room_lz", "room_key",
+    "distance_m", "ref_delay",
     "n_mics", "sample_rate", "n_samples",
 ]
 
@@ -65,6 +66,15 @@ def _sample_order(n_utts: int, n_samples: int, rng: np.random.Generator) -> list
     while len(order) < n_samples:
         order.extend(int(i) for i in rng.permutation(n_utts))
     return order[:n_samples]
+
+
+def _source_distance(room, sim_cfg: SimConfig) -> float:
+    """声源到阵列中心的距离（米）。参考信号的时延就由它决定。"""
+    from .simulate import array_center
+
+    cx, cy = array_center(room)
+    center = np.array([cx, cy, sim_cfg.array.height])
+    return float(np.linalg.norm(room.source_pos - center))
 
 
 def _draw_snr_target(spec: BatchSpec, sim_cfg: SimConfig,
@@ -179,6 +189,8 @@ def generate_batch(utterances: list[Utterance], noise_files: list[Path],
             "room_ly": f"{room.size[1]:.4f}",
             "room_lz": f"{room.size[2]:.4f}",
             "room_key": room.key(),
+            "distance_m": f"{_source_distance(room, sim_cfg):.4f}",
+            "ref_delay": int(out["ref_delay"]),
             "n_mics": sim_cfg.array.n_mics,
             "sample_rate": sim_cfg.sample_rate,
             "n_samples": int(out["multi_ch"].shape[1]),
