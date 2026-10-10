@@ -36,6 +36,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from nbse.models.crn import CRN, CRN_SMALL  # noqa: E402
 from nbse.models.dataset import NbseDataset, collate_samples  # noqa: E402
 from nbse.training import (  # noqa: E402
+    EarlyStopState,
     TrainConfig,
     TrainState,
     append_history,
@@ -162,6 +163,9 @@ def main() -> int:
     ap.add_argument("--lr-floor", type=float, default=None,
                     help="退火下界占 lr 的比例（默认 0.01）。设 1.0 即不退火，"
                          "用于诊断残留 loss 是优化不足还是信息上限")
+    ap.add_argument("--early-stop-patience", type=int, default=None,
+                    help="验证损失连续多少个 epoch 无改善就停止（默认配置值）。"
+                         "0 表示关闭早停、跑满 --epochs")
     ap.add_argument("--limit", type=int, default=None, help="只用前 N 条样本")
     ap.add_argument("--segment-length", type=int, default=None)
     ap.add_argument("--models", default="default",
@@ -182,7 +186,8 @@ def main() -> int:
                                batch_size=args.batch_size,
                                lr=args.lr,
                                segment_length=args.segment_length,
-                               lr_floor=args.lr_floor)
+                               lr_floor=args.lr_floor,
+                               early_stop_patience=args.early_stop_patience)
     if args.no_amp:
         cfg.amp = False
 
@@ -239,6 +244,16 @@ def main() -> int:
     print(f"超参      : epochs={cfg.epochs} bs={cfg.batch_size} "
           f"accum={cfg.grad_accum_steps} lr={cfg.lr} amp={cfg.amp} "
           f"seed={cfg.seed}")
+    # 早停状态必须显式说明，尤其是「请求了但无法启用」的情况——
+    # 否则使用者以为有早停保护，实际会跑满 epochs 才发现。
+    _p = int(cfg.early_stop_patience)
+    if _p <= 0:
+        print(f"早停      : 关闭（patience={_p}），将跑满 {cfg.epochs} 个 epoch")
+    elif val_loader is None:
+        print(f"早停      : 未启用 —— 没有验证集，而早停只监控验证损失"
+              f"（训练损失单调下降，用它做早停永不触发）")
+    else:
+        print(f"早停      : 验证损失连续 {_p} 个 epoch 无改善即停止")
     print(f"输出      : {out_dir}")
     if args.overfit:
         print(f"模式      : 过拟合测试（T3.4）—— {OVERFIT_N} 条样本、"
@@ -259,6 +274,9 @@ def main() -> int:
     history_path = out_dir / "history.jsonl"
     best_path = out_dir / "best.pt"
     last_path = out_dir / "last.pt"
+
+    # 早停状态。patience<=0 关闭；无验证集时不启用（见循环内注释）。
+    es = EarlyStopState(patience=int(cfg.early_stop_patience))
 
     t0 = time.time()
     for epoch in range(state.epoch, cfg.epochs):
@@ -290,11 +308,13 @@ def main() -> int:
 
         # 验证集优先，其次训练损失——过拟合测试没有验证集
         monitor = va["loss"] if va is not None else tr["loss"]
-        if monitor < state.best_val:
+        _improved = monitor < state.best_val - 1e-12
+        if _improved:
             state.best_val = monitor
             save_checkpoint(best_path, model, optimizer, scheduler, state, cfg,
                             extra={"monitor": "val" if va else "train",
-                                   "monitor_value": monitor})
+                                   "monitor_value": monitor,
+                                   "epoch": epoch + 1})
 
         save_checkpoint(last_path, model, optimizer, scheduler, state, cfg)
 
@@ -302,10 +322,36 @@ def main() -> int:
             print("\n--dry-run：已跑通 1 个 batch，退出")
             break
 
+        # ── 早停 ──
+        # 只监控**验证损失**：训练损失单调下降，用它做早停永远不会触发。
+        # 因此没有验证集时不启用（启动摘要里已明确说明），
+        # 而不是偷偷退化成监控训练损失。
+        if not es.enabled:
+            continue
+        if val_loader is None:
+            continue
+
+        if es.update(monitor, epoch + 1):
+            print(f"\n早停：验证损失连续 {es.epochs_no_improve} 个 epoch 无改善"
+                  f"（最优 {es.best:.5f} @ epoch {es.best_epoch}），"
+                  f"在第 {epoch + 1} 个 epoch 停止")
+            break
+        if es.epochs_no_improve > 0 and \
+                es.epochs_no_improve % max(es.patience // 4, 1) == 0:
+            print(f"  （验证损失已连续 {es.epochs_no_improve}/{es.patience} "
+                  f"个 epoch 无改善）")
+
     # ── 收尾 ──
     print("\n" + "=" * 74)
     print(f"完成，用时 {time.time() - t0:.1f} s")
-    print(f"最佳监控值 {state.best_val:.5f}")
+    print(f"最佳监控值 {state.best_val:.5f}"
+          + (f"（epoch {es.best_epoch}）" if es.best_epoch else ""))
+    if es.stopped:
+        print(f"提前停止  : 在第 {state.epoch}/{cfg.epochs} 个 epoch "
+              f"（省下 {cfg.epochs - state.epoch} 个 epoch）")
+    elif es.enabled and val_loader is not None:
+        print(f"跑满      : {state.epoch}/{cfg.epochs} 个 epoch "
+              f"（早停未触发，说明末段仍在改善）")
     print(f"checkpoint：{best_path}")
     print(f"            {last_path}")
     print(f"训练曲线  ：{history_path}")

@@ -19,6 +19,7 @@ from nbse.models.dataset import (
     collate_samples,
 )
 from nbse.training import (
+    EarlyStopState,
     TrainConfig,
     TrainState,
     append_history,
@@ -425,3 +426,109 @@ def test_pick_device_falls_back_to_cpu():
     got = pick_device("cuda")
     assert got.type in ("cuda", "cpu")
     assert describe_device(got)
+
+
+# ── 早停 ────────────────────────────────────────────────────────
+
+def test_early_stop_triggers_after_patience_non_improvements():
+    es = EarlyStopState(patience=3)
+
+    assert es.update(1.0, 1) is False        # 改善
+    assert es.best == 1.0 and es.best_epoch == 1
+    for e, v in ((2, 1.1), (3, 1.2), (4, 1.3)):
+        stop = es.update(v, e)
+    assert stop is True, "连续 3 次无改善后应停止"
+    assert es.stopped and es.epochs_no_improve == 3
+    assert es.best == 1.0, "最优值不应被后续更差值覆盖"
+    assert es.best_epoch == 1
+
+
+def test_early_stop_resets_counter_on_improvement():
+    """任何一次改善都必须清零计数 —— 否则会把「仍在进步」误判为停滞。"""
+    es = EarlyStopState(patience=3)
+    es.update(1.0, 1)
+    es.update(1.1, 2)          # 无改善 1
+    es.update(1.2, 3)          # 无改善 2
+    assert es.epochs_no_improve == 2
+    assert es.update(0.9, 4) is False   # 改善 → 清零
+    assert es.epochs_no_improve == 0
+    assert es.best == 0.9 and es.best_epoch == 4
+    assert es.update(1.0, 5) is False   # 重新计数
+    assert es.epochs_no_improve == 1
+
+
+def test_early_stop_never_triggers_while_improving():
+    es = EarlyStopState(patience=2)
+    for e in range(1, 30):
+        assert es.update(1.0 / e, e) is False
+    assert es.stopped is False
+
+
+def test_early_stop_disabled_when_patience_non_positive():
+    """patience<=0 表示关闭：即使长期无改善也不停。
+
+    计数仍应累加（便于日志观察），但永不置 stopped。
+    """
+    for p in (0, -1):
+        es = EarlyStopState(patience=p)
+        assert es.enabled is False
+        for e in range(1, 51):
+            assert es.update(1.0, e) is False
+        assert es.stopped is False
+        # 第 1 次是「改善」（建立基线），其余 49 次算无改善
+        assert es.epochs_no_improve == 49, f"patience={p} 计数不对"
+
+
+def test_early_stop_ignores_float_noise_scale_improvements():
+    """末位级别的「改善」不应重置计数。
+
+    没有容差时，`x < x_prev` 会因浮点末位差异反复为真，让耐心计数永远归零、
+    早停形同虚设——这是最隐蔽的失效方式，因为日志上看「一直在改善」。
+
+    注意断言方式：不能逐次断言 `is False`，因为 patience 用尽后的第 N+1 次
+    本来就该返回 True（那正是早停生效）。这里只检查「确实在 patience 次后
+    停止」与「最优值没被噪声覆盖」。
+    """
+    es = EarlyStopState(patience=3)
+    es.update(1.0, 1)
+    vals = [1.0 - 1e-15] * 6           # 1e-15 远小于 1e-12 容差，属纯噪声
+
+    stops = [es.update(v, e) for e, v in enumerate(vals, start=2)]
+
+    assert stops[:2] == [False, False], "patience 未用尽前不应停止"
+    assert stops[2] is True, "第 3 次无改善时应停止"
+    assert es.best == 1.0, "浮点噪声不应覆盖最优值"
+    assert es.best_epoch == 1
+
+    # 对照：真正的改善（超过容差）仍必须被识别
+    es2 = EarlyStopState(patience=3)
+    es2.update(1.0, 1)
+    assert es2.update(1.0 - 1e-9, 2) is False   # 1e-9 > 1e-12，算改善
+    assert es2.best == 1.0 - 1e-9 and es2.epochs_no_improve == 0
+
+
+def test_early_stop_counts_epochs_exactly_at_threshold():
+    """刚好达到 patience 时停止（>= 而非 >）。"""
+    es = EarlyStopState(patience=1)
+    es.update(1.0, 1)
+    assert es.update(1.0, 2) is True, "patience=1 时一次无改善即应停止"
+
+
+def test_train_config_parses_early_stop_patience(tmp_path):
+    """YAML 里的 early_stop_patience 必须被读到 —— 否则早停静默失效。"""
+    import yaml
+
+    p = tmp_path / "cfg.yaml"
+    p.write_text(yaml.safe_dump({
+        "seed": 1, "train": {"epochs": 5, "early_stop_patience": 7},
+    }), encoding="utf-8")
+
+    cfg = TrainConfig.from_yaml(p)
+    assert cfg.early_stop_patience == 7
+    # 覆盖参数生效
+    cfg2 = TrainConfig.from_yaml(p, early_stop_patience=0)
+    assert cfg2.early_stop_patience == 0
+    # 缺省时用默认值
+    p2 = tmp_path / "cfg2.yaml"
+    p2.write_text(yaml.safe_dump({"train": {"epochs": 5}}), encoding="utf-8")
+    assert TrainConfig.from_yaml(p2).early_stop_patience == 20

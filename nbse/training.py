@@ -88,9 +88,26 @@ class TrainConfig:
     # 退火下界占 lr 的比例。默认 0.01（退到 1%）。
     # 诊断用：设成 1.0 即不退火，用来区分「优化不足」与「信息上限」。
     lr_floor: float = 0.01
+    # 早停：验证损失连续多少个 epoch 无改善就停止。<=0 表示关闭。
+    # 只监控**验证损失**——训练损失单调下降，用它做早停永远不会触发。
+    #
+    # 标定（用 100 epoch 的完整训练曲线回放）：最优 0.02661 出现在 epoch 91，
+    # 末段仍在缓慢改善，故 patience ∈ {10..30} 都**不会触发**。即当前
+    # 「3000 条 + 100 epoch」的配置本就该跑满，早停在此不省时间。
+    # 它的价值在 epochs 给多了、或数据/模型变化导致早早收敛的场景。
+    early_stop_patience: int = 20
 
     @classmethod
     def from_yaml(cls, path: str | Path, **overrides) -> "TrainConfig":
+        """从 YAML 读训练超参。
+
+        **每个新增字段都必须在这里显式读出**，否则 YAML 里的值会被静默忽略、
+        退回 dataclass 默认值。这类漏读极难发现：若配置里写的恰好等于默认值，
+        行为完全看不出差别，直到有人改配置却「没反应」。
+
+        （实测踩到：`early_stop_patience` 与 `lr_floor` 都曾漏读。
+        前者因配置值与默认值同为 20 而完全隐身。）
+        """
         import yaml
 
         raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
@@ -105,6 +122,8 @@ class TrainConfig:
             amp=bool(t.get("amp", True)),
             num_workers=int(t.get("num_workers", 0)),
             seed=int(raw.get("seed", 20261009)),
+            lr_floor=float(t.get("lr_floor", 0.01)),
+            early_stop_patience=int(t.get("early_stop_patience", 20)),
         )
         for k, v in overrides.items():
             if v is not None:
@@ -318,6 +337,37 @@ def append_history(path: str | Path, record: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+@dataclass
+class EarlyStopState:
+    """早停状态。把判据与副作用分离，便于精确测试边界。"""
+    patience: int = 20
+    best: float = math.inf
+    epochs_no_improve: int = 0
+    stopped: bool = False
+    best_epoch: int = 0
+
+    @property
+    def enabled(self) -> bool:
+        return self.patience > 0
+
+    def update(self, monitor: float, epoch: int) -> bool:
+        """喂入本 epoch 的监控值，返回**是否应停止**。
+
+        改善判据带 1e-12 容差：浮点下 `x < x` 可能因末位差异反复触发
+        「改善」，让 patience 永不累加、早停形同虚设。
+        """
+        if monitor < self.best - 1e-12:
+            self.best = monitor
+            self.best_epoch = epoch
+            self.epochs_no_improve = 0
+            return False
+
+        self.epochs_no_improve += 1
+        if self.enabled and self.epochs_no_improve >= self.patience:
+            self.stopped = True
+        return self.stopped
 
 
 def pick_device(prefer: str = "cuda") -> torch.device:
