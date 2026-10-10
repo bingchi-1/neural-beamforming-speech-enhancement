@@ -109,6 +109,84 @@ def _write_wav_preview(path: Path, sr: int, **channels: np.ndarray) -> None:
         sf.write(str(path.with_name(f"{path.stem}_{name}.wav")), _to_int16(arr.T), sr)
 
 
+def _load_pair(utt: Utterance, noise_path: Path,
+               sim_cfg: SimConfig) -> tuple[np.ndarray, np.ndarray]:
+    """读入一条语音与一条噪声，并校验采样率。"""
+    clean, sr = load_audio(utt.path)
+    if sr != sim_cfg.sample_rate:
+        raise ValueError(
+            f"{utt.path} 采样率 {sr} Hz，与配置的 {sim_cfg.sample_rate} Hz 不符。"
+            f"PESQ 宽带模式要求 16 kHz。"
+        )
+    noise, nsr = load_audio(noise_path)
+    if nsr != sim_cfg.sample_rate:
+        raise ValueError(f"{noise_path} 采样率 {nsr} Hz，与配置不符")
+    return clean, noise
+
+
+def _render_sample(idx: int, utt: Utterance, noise_path: Path, room,
+                   snr_target: float, sim_cfg: SimConfig, out_dir: Path,
+                   cache_dir: Path | None, rng: np.random.Generator,
+                   wav_preview: int) -> dict:
+    """合成一条样本、落盘、返回 manifest 的一行。"""
+    clean, noise = _load_pair(utt, noise_path, sim_cfg)
+
+    out = simulate_sample(clean, noise, replace(sim_cfg, snr_db=snr_target),
+                          rng, room_cfg=room, cache_dir=cache_dir)
+
+    name = f"sample_{idx:05d}.npz"
+    np.savez(
+        out_dir / name,
+        multi_ch=out["multi_ch"].astype(np.float32),
+        clean_ref=out["clean_ref"].astype(np.float32),
+        noise_multi=out["noise_multi"].astype(np.float32),
+        doa_true=np.float64(out["doa_true"]),
+        snr_db=np.float64(out["snr_db"]),
+    )
+
+    if idx < wav_preview:
+        _write_wav_preview(out_dir / f"preview_{idx:05d}", sim_cfg.sample_rate,
+                           mix=out["multi_ch"], clean=out["clean_ref"],
+                           noise=out["noise_multi"])
+
+    return {
+        "index": idx,
+        "file": name,
+        "subset": utt.subset,
+        "speaker": utt.speaker,
+        "chapter": utt.chapter,
+        "utterance": utt.path.name,
+        "noise_env": noise_path.parent.name,
+        "noise_file": noise_path.name,
+        "snr_target_db": f"{snr_target:.2f}",
+        "snr_db": f"{out['snr_db']:.4f}",
+        "doa_true": f"{out['doa_true']:.4f}",
+        "t60": f"{room.t60:.4f}",
+        "room_lx": f"{room.size[0]:.4f}",
+        "room_ly": f"{room.size[1]:.4f}",
+        "room_lz": f"{room.size[2]:.4f}",
+        "room_key": room.key(),
+        "distance_m": f"{_source_distance(room, sim_cfg):.4f}",
+        "ref_delay": int(out["ref_delay"]),
+        "n_mics": sim_cfg.array.n_mics,
+        "sample_rate": sim_cfg.sample_rate,
+        "n_samples": int(out["multi_ch"].shape[1]),
+    }
+
+
+def _run_jobs(jobs, utterances, sim_cfg, spec, out_dir, cache_dir, rng,
+              progress) -> list[dict]:
+    """把作业列表逐条渲染成样本。作业 = (语料下标, 噪声路径, 房间, 目标 SNR)。"""
+    rows: list[dict] = []
+    for i, (utt_idx, noise_path, room, snr_target) in enumerate(jobs):
+        rows.append(_render_sample(i, utterances[utt_idx], noise_path, room,
+                                   snr_target, sim_cfg, out_dir, cache_dir, rng,
+                                   spec.wav_preview))
+        if progress is not None:
+            progress(i + 1, len(jobs))
+    return rows
+
+
 def generate_batch(utterances: list[Utterance], noise_files: list[Path],
                    sim_cfg: SimConfig, spec: BatchSpec,
                    cache_dir: Path | None = None,
@@ -130,75 +208,66 @@ def generate_batch(utterances: list[Utterance], noise_files: list[Path],
 
     rng = np.random.default_rng(spec.seed)
     noise_arr = np.asarray(noise_files, dtype=object)
-    rows: list[dict] = []
 
-    order = _sample_order(len(utterances), spec.n_samples, rng)
-    for i, utt_idx in enumerate(order):
-        utt = utterances[utt_idx]
-        clean, sr = load_audio(utt.path)
-        if sr != sim_cfg.sample_rate:
-            raise ValueError(
-                f"{utt.path} 采样率 {sr} Hz，与配置的 {sim_cfg.sample_rate} Hz 不符。"
-                f"PESQ 宽带模式要求 16 kHz。"
-            )
-
+    jobs = []
+    for utt_idx in _sample_order(len(utterances), spec.n_samples, rng):
         noise_path = Path(noise_arr[int(rng.integers(len(noise_files)))])
-        noise, nsr = load_audio(noise_path)
-        if nsr != sim_cfg.sample_rate:
-            raise ValueError(f"{noise_path} 采样率 {nsr} Hz，与配置不符")
-
         room = sample_room(sim_cfg, rng)
         if spec.t60_levels:
             room.t60 = float(rng.choice(np.asarray(spec.t60_levels, dtype=float)))
+        jobs.append((utt_idx, noise_path, room,
+                     _draw_snr_target(spec, sim_cfg, rng)))
 
-        snr_target = _draw_snr_target(spec, sim_cfg, rng)
-        cfg_i = replace(sim_cfg, snr_db=snr_target)
+    rows = _run_jobs(jobs, utterances, sim_cfg, spec, out_dir, cache_dir, rng,
+                     progress)
+    _write_manifest(out_dir, rows)
+    _write_run_config(out_dir, sim_cfg, spec, cache_dir)
+    return rows
 
-        out = simulate_sample(clean, noise, cfg_i, rng, room_cfg=room,
-                              cache_dir=cache_dir)
 
-        name = f"sample_{i:05d}.npz"
-        np.savez(
-            out_dir / name,
-            multi_ch=out["multi_ch"].astype(np.float32),
-            clean_ref=out["clean_ref"].astype(np.float32),
-            noise_multi=out["noise_multi"].astype(np.float32),
-            doa_true=np.float64(out["doa_true"]),
-            snr_db=np.float64(out["snr_db"]),
-        )
+def generate_grid(utterances: list[Utterance], noise_files: list[Path],
+                  sim_cfg: SimConfig, spec: BatchSpec,
+                  n_utterances: int = 20,
+                  cache_dir: Path | None = None,
+                  progress=None) -> list[dict]:
+    """生成**配对**评估网格：`n_utterances` 条语料 × (SNR 档 × T60 档) 全交叉。
 
-        if i < spec.wav_preview:
-            _write_wav_preview(out_dir / f"preview_{i:05d}", sim_cfg.sample_rate,
-                               mix=out["multi_ch"], clean=out["clean_ref"],
-                               noise=out["noise_multi"])
+    与 `generate_batch` 的关键区别是把无关变量控制住：
 
-        rows.append({
-            "index": i,
-            "file": name,
-            "subset": utt.subset,
-            "speaker": utt.speaker,
-            "chapter": utt.chapter,
-            "utterance": utt.path.name,
-            "noise_env": noise_path.parent.name,
-            "noise_file": noise_path.name,
-            "snr_target_db": f"{snr_target:.2f}",
-            "snr_db": f"{out['snr_db']:.4f}",
-            "doa_true": f"{out['doa_true']:.4f}",
-            "t60": f"{room.t60:.4f}",
-            "room_lx": f"{room.size[0]:.4f}",
-            "room_ly": f"{room.size[1]:.4f}",
-            "room_lz": f"{room.size[2]:.4f}",
-            "room_key": room.key(),
-            "distance_m": f"{_source_distance(room, sim_cfg):.4f}",
-            "ref_delay": int(out["ref_delay"]),
-            "n_mics": sim_cfg.array.n_mics,
-            "sample_rate": sim_cfg.sample_rate,
-            "n_samples": int(out["multi_ch"].shape[1]),
-        })
+    * 同一条语料在所有条件下复用**同一套房间几何与同一条噪声**，只改 T60 与 SNR。
+      否则条件之间的差异会混入「房间不同」这一无关变量，条件间不可比。
+    * 作业按 (SNR, T60) 分组生成，manifest 里连续一片就是同一条件，
+      评测脚本按条件聚合时不必额外对齐。
 
-        if progress is not None:
-            progress(i + 1, len(order))
+    要求 snr_levels 与 t60_levels 都给全——配对网格没有「随机」这一档。
+    """
+    if not spec.snr_levels or not spec.t60_levels:
+        raise ValueError("generate_grid 需要同时给定 snr_levels 与 t60_levels")
+    if not utterances or not noise_files:
+        raise ValueError("语料列表或噪声列表为空")
 
+    n_utterances = min(int(n_utterances), len(utterances))
+    out_dir = Path(spec.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(spec.seed)
+    noise_arr = np.asarray(noise_files, dtype=object)
+
+    # 每条语料先固定一套「房间几何 + 噪声」——这是配对的前提
+    pool = [int(u) for u in rng.permutation(len(utterances))[:n_utterances]]
+    base_rooms = {u: sample_room(sim_cfg, rng) for u in pool}
+    base_noise = {u: Path(noise_arr[int(rng.integers(len(noise_files)))])
+                  for u in pool}
+
+    jobs = []
+    for snr in spec.snr_levels:
+        for t60 in spec.t60_levels:
+            for u in pool:
+                room = replace(base_rooms[u])     # 复制后只改 T60，几何保持不动
+                room.t60 = float(t60)
+                jobs.append((u, base_noise[u], room, float(snr)))
+
+    rows = _run_jobs(jobs, utterances, sim_cfg, spec, out_dir, cache_dir, rng,
+                     progress)
     _write_manifest(out_dir, rows)
     _write_run_config(out_dir, sim_cfg, spec, cache_dir)
     return rows

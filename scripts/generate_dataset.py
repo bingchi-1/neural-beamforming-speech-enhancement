@@ -39,6 +39,7 @@ from nbse.data.corpus import (  # noqa: E402
 from nbse.data.generate import (  # noqa: E402
     BatchSpec,
     generate_batch,
+    generate_grid,
     load_manifest,
     verify_batch,
 )
@@ -58,6 +59,11 @@ def main() -> int:
     ap.add_argument("--config", default="configs/default.yaml")
     ap.add_argument("--split", default="train", choices=["train", "val", "test"])
     ap.add_argument("--n", type=int, default=200, help="生成样本条数（T1.4 要求 ≥200）")
+    ap.add_argument("--grid", action="store_true",
+                    help="配对评估网格模式：语料数次 --n-utterances × SNR 档 × T60 档，"
+                         "同一语料在各条件下复用同一房间几何与噪声（需同时给 --snr 与 --t60）")
+    ap.add_argument("--n-utterances", type=int, default=20,
+                    help="网格模式下每个条件用多少条语料")
     ap.add_argument("--seed", type=int, default=None, help="默认取配置里的 seed")
     ap.add_argument("--out", default=None, help="默认 data/sim/<split>")
     ap.add_argument("--snr", type=float, nargs="+", default=None,
@@ -119,8 +125,15 @@ def main() -> int:
                              f"（{time.time() - t0:.0f} s）")
             sys.stdout.flush()
 
-    rows = generate_batch(utterances, noise_files, sim_cfg, spec,
-                          cache_dir=cache_dir, progress=_progress)
+    if args.grid:
+        if args.snr is None or args.t60 is None:
+            ap.error("--grid 需要同时给出 --snr 与 --t60（配对网格没有「随机」这一档）")
+        rows = generate_grid(utterances, noise_files, sim_cfg, spec,
+                             n_utterances=args.n_utterances,
+                             cache_dir=cache_dir, progress=_progress)
+    else:
+        rows = generate_batch(utterances, noise_files, sim_cfg, spec,
+                              cache_dir=cache_dir, progress=_progress)
     print(f"\n完成，用时 {time.time() - t0:.1f} s")
 
     # 落盘核对（T1.4 验收）

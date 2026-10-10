@@ -180,3 +180,53 @@ def test_empty_corpus_raises(tiny_corpus):
     root, _, noise_files, sim_cfg = tiny_corpus
     with pytest.raises(ValueError, match="语料列表为空"):
         generate_batch([], noise_files, sim_cfg, _spec(root))
+
+
+# ── 配对评估网格 ────────────────────────────────────────────────
+
+def test_grid_covers_every_condition_for_every_utterance(tiny_corpus):
+    """网格 = 语料数 × SNR 档 × T60 档，且每条语料在每档条件下都出现一次。"""
+    from nbse.data.generate import generate_grid
+
+    root, utterances, noise_files, sim_cfg = tiny_corpus
+    spec = _spec(root, snr_levels=(-5.0, 0.0, 5.0), t60_levels=(0.3, 0.6))
+    rows = generate_grid(utterances, noise_files, sim_cfg, spec, n_utterances=2)
+
+    assert len(rows) == 2 * 3 * 2
+    seen = {(r["utterance"], r["snr_target_db"], r["t60"]) for r in rows}
+    assert len(seen) == len(rows), "条件组合有重复"
+
+
+def test_grid_holds_room_and_noise_fixed_across_conditions(tiny_corpus):
+    """配对的关键：同一语料在各条件下必须复用同一套房间几何与同一条噪声。
+
+    否则条件之间的差异会混入「房间不同」这一无关变量，条件间不可比。
+    T60 与 SNR 是刻意操纵的变量，理应不同。
+    """
+    from nbse.data.generate import generate_grid
+
+    root, utterances, noise_files, sim_cfg = tiny_corpus
+    spec = _spec(root, snr_levels=(-5.0, 5.0), t60_levels=(0.3, 0.6))
+    rows = generate_grid(utterances, noise_files, sim_cfg, spec, n_utterances=2)
+
+    by_utt = {}
+    for r in rows:
+        by_utt.setdefault(r["utterance"], []).append(r)
+
+    for utt, group in by_utt.items():
+        assert len(group) == 4, f"{utt} 的条件数不对"
+        for field in ("noise_file", "doa_true", "room_lx", "room_ly", "room_lz",
+                      "distance_m"):
+            assert len({r[field] for r in group}) == 1, \
+                f"{utt} 的 {field} 在不同条件下不一致，配对被打断"
+        assert {r["t60"] for r in group} == {"0.3000", "0.6000"}
+        assert {r["snr_target_db"] for r in group} == {"-5.00", "5.00"}
+
+
+def test_grid_requires_both_levels(tiny_corpus):
+    from nbse.data.generate import generate_grid
+
+    root, utterances, noise_files, sim_cfg = tiny_corpus
+    with pytest.raises(ValueError, match="snr_levels"):
+        spec = _spec(root, snr_levels=(-5.0,))       # 少了 t60_levels
+        generate_grid(utterances, noise_files, sim_cfg, spec, n_utterances=2)
