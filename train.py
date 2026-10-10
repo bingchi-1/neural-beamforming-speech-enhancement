@@ -54,6 +54,13 @@ OVERFIT_N = 10
 OVERFIT_EPOCHS = 150
 OVERFIT_LR = 2e-3
 
+# 时间预算（实测，2026-10-10，RTX 5070 Ti Laptop 11.9 GB，AMP fp16）：
+#   训练集 240 条、batch 4、accum 4、片段 1 s、默认 CRN
+#     → 稳态 8.2 s/epoch（60 个 batch / 15 个优化步），首 epoch 8.9 s
+#     → 100 epoch ≈ 14 min，远低于实施计划给 W4 的 5 h 预算
+#   真实瓶颈是 CPU 侧的 STFT 与数据读取，不是 GPU：纯前向+反传仅 ~8.5 ms/batch，
+#   而端到端是 ~137 ms/batch。故 data/ 样本量（而非 epoch 数）才是主要成本。
+
 # 模型预设。`CRN_SMALL` 用于过拟合测试与显存受限时的快速迭代；
 # 正式训练用默认 CRN（约 3.3 M 参数，见 crn.DEFAULT_NUM_PARAMETERS）。
 MODEL_PRESETS = {

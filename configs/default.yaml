@@ -56,4 +56,10 @@ train:
   scheduler: cosine
   amp: true                 # 混合精度
   grad_clip: 1.0
-  num_workers: 4
+  # 必须为 0。实测（40 条样本、batch 2、随机片段）：
+  #   num_workers=0 → 0.26 s/epoch
+  #   num_workers=4 → 2.56 s/epoch   （慢 10 倍）
+  # Windows 上每个 epoch 都要重建 worker 进程，而本项目的样本量很小、
+  # 单条只需一次 STFT，进程启动开销远超省下的读取时间。
+  # 在 Linux 或数据量大幅增加后再考虑调大。
+  num_workers: 0
