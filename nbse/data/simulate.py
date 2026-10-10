@@ -228,6 +228,18 @@ def _room_and_rirs(room_cfg: RoomConfig, cfg: SimConfig,
     return out
 
 
+def array_signature(cfg: SimConfig) -> str:
+    """阵列几何 + 采样率的短哈希，用于 RIR 缓存文件名。
+
+    只按阵元数命名是不够的：半径、阵型、高度、采样率任一改变都会得到
+    完全不同的 RIR，却会命中同一个缓存文件，静默复用错误的房间响应。
+    """
+    a = cfg.array
+    payload = (f"{a.type}|{a.n_mics}|{a.radius}|{a.spacing}|{a.height}"
+               f"|{cfg.sample_rate}")
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:8]
+
+
 def get_rirs(room_cfg: RoomConfig, cfg: SimConfig, cache_dir: Path | None,
              n_sources: int = 2) -> np.ndarray:
     """取 RIR，优先读缓存。
@@ -237,7 +249,8 @@ def get_rirs(room_cfg: RoomConfig, cfg: SimConfig, cache_dir: Path | None,
     if cache_dir is not None:
         cache_dir = Path(cache_dir)
         cache_dir.mkdir(parents=True, exist_ok=True)
-        path = cache_dir / f"{room_cfg.key()}_m{cfg.array.n_mics}.npz"
+        path = cache_dir / (f"{room_cfg.key()}_m{cfg.array.n_mics}"
+                            f"_a{array_signature(cfg)}.npz")
         if path.exists():
             with np.load(path) as z:
                 return z["rir"]

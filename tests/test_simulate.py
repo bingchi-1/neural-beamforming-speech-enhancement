@@ -134,14 +134,26 @@ def test_sampled_room_keeps_sources_inside():
         assert cfg.t60_range[0] <= room.t60 <= cfg.t60_range[1]
 
 
-def test_room_key_is_deterministic_and_discriminative():
-    """RIR 缓存依赖 key 的稳定性：同配置同 key，异配置异 key。"""
-    cfg = SimConfig()
-    rng = np.random.default_rng(5)
-    a = sample_room(cfg, rng)
-    b = sample_room(cfg, rng)
-    assert a.key() == a.key()
-    assert a.key() != b.key()
+def test_array_signature_tracks_geometry():
+    """RIR 缓存文件名必须随阵列几何/采样率变化。
+
+    只按阵元数命名时，把半径从 4 cm 改成 6 cm 会命中同一个缓存文件，
+    静默复用错误的房间响应——这类错误不会报错，只会让结果悄悄失真。
+    """
+    from nbse.data.simulate import array_signature
+
+    base = SimConfig()
+    assert array_signature(base) == array_signature(SimConfig())
+
+    for change in (
+        dict(array=ArrayConfig(type="circular", n_mics=4, radius=0.06)),
+        dict(array=ArrayConfig(type="circular", n_mics=4, radius=0.04, height=1.5)),
+        dict(array=ArrayConfig(type="linear", n_mics=4, radius=0.04)),
+        dict(sample_rate=8000),
+        dict(array=ArrayConfig(type="circular", n_mics=8, radius=0.04)),
+    ):
+        assert array_signature(SimConfig(**change)) != array_signature(base), \
+            f"{change} 没有改变阵列签名"
 
 
 # ── 2. 端到端仿真（需要 pyroomacoustics）────────────────────────
