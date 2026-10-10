@@ -220,3 +220,56 @@ def test_multi_channel_is_not_identical_across_mics(sim_env):
         for j in range(i + 1, multi.shape[0]):
             assert not np.allclose(multi[i], multi[j]), \
                 f"通道 {i} 与 {j} 完全相同，阵列仿真未生效"
+
+
+def test_clean_ref_is_time_aligned_with_observation(sim_env):
+    """参考信号必须与观测在时间上对齐 —— 否则所有逐样本指标全部失效。
+
+    历史 bug：clean_ref 曾是未延迟的干声，而声源距阵列 1–3 m（传播时延
+    3–9 ms）。SI-SDR 对整体时延零容忍，实测一条只是延迟 117 点的完美信号
+    SI-SDR 只有 −59 dB，于是整批数据的指标被压在 −30 ~ −60 dB 的无意义区间。
+    """
+    from nbse.data.simulate import simulate_sample
+    from nbse.metrics import si_sdr
+
+    cfg, rng, clean, noise, cache = sim_env
+    cfg.snr_db = 10.0                      # 高 SNR，让互相关由语音主导
+
+    # 用带限信号（0–3.4 kHz，即语音频带）而非 fixture 里的白噪声：
+    # 白噪声在任意非零整数滞后上都近乎正交，2 个采样点的残差就能把
+    # SI-SDR 打到 −25 dB，无法反映真实语音的行为。
+    n = int(cfg.sample_rate * cfg.duration)
+    spec = np.fft.rfft(rng.normal(size=n))
+    freqs = np.fft.rfftfreq(n, 1.0 / cfg.sample_rate)
+    spec[freqs > 3400] = 0.0
+    clean = np.fft.irfft(spec, n)
+
+    out = simulate_sample(clean, noise, cfg, rng, cache_dir=cache)
+
+    ref, obs = out["clean_ref"], out["multi_ch"][0]
+    assert out["ref_delay"] > 0, "参考信号的时延应为正（声源总比参考点远）"
+
+    # 在 ±8 采样点内找互相关峰
+    lags = np.arange(-8, 9)
+    n = len(ref)
+    corr = []
+    for k in lags:
+        a, b = (ref[: n - k], obs[k:]) if k >= 0 else (ref[-k:], obs[: n + k])
+        a, b = a - a.mean(), b - b.mean()
+        corr.append(float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))))
+    best = int(np.argmax(corr))
+    best_lag, best_rho = int(lags[best]), corr[best]
+
+    # 两条判据缺一不可：
+    #   容差 3 点——参考信号对齐的是**阵列中心**（波束形成器的参考点），
+    #   而这里比的是 0 号麦克风，两者相距半径 4 cm ≈ 1.9 个采样点。
+    #   相关性——修复前参考信号整体晚了 50–150 点，在上述 ±8 窗口内相关性
+    #   近乎为零，仅靠 argmax 会因噪声而在窗口内随机取值，必须配合相关性判据。
+    assert abs(best_lag) <= 3, f"参考与观测相差 {best_lag} 个采样点，未对齐"
+    assert best_rho >= 0.3, (
+        f"最佳滞后处相关性仅 {best_rho:.3f}，参考信号可能整体错位（实测正常值约 0.5）"
+    )
+
+    # 不用 SI-SDR 设阈值：小房间里混响主导，对齐后它也只有几 dB 且随房间波动大，
+    # 阈值会变得难以稳定。混响对该指标的影响由 T2.4 按 T60 分档来体现。
+    assert np.isfinite(si_sdr(ref, obs))

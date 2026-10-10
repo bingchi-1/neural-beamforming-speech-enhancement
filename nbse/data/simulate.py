@@ -15,10 +15,24 @@
 ----
 每个样本包含：
     multi_ch     [n_mics, T]  多通道混合观测
-    clean_ref    [T]          单通道干净参考（dry）
+    clean_ref    [T]          单通道干净参考（dry，**已对齐到阵列中心**，见下）
     noise_multi  [n_mics, T]  纯噪声多通道信号（MVDR 估计噪声协方差需要）
     doa_true     float        声源方位角（度，相对阵列中心），供 Oracle DOA 使用
     snr_db       float        该样本的实际信噪比
+    ref_delay    int          参考信号对齐所用的时延（采样点）
+
+为什么参考信号必须对齐
+----------------------
+声源距阵列 1–3 m，传播时延 3–9 ms。而 SI-SDR / PESQ / STOI 都是**逐样本**
+指标，对整体时延零容忍：一个只是延迟了 117 点的完美信号，相关系数为 1.000，
+SI-SDR 却是 −59 dB（实测）。参考信号若不做时延补偿，所有指标都会坍塌到
+−30 ~ −60 dB 这一无意义的区间。波束形成器的输出对齐的是**阵列中心**
+（DS 只补偿阵元间相对时延），故参考信号也按阵列中心对齐。
+
+另有一个坑：pyroomacoustics 生成的 RIR 带一个**与距离无关的固定群延迟**
+（内部分数延迟滤波器，默认 81 抽头 → 40 个采样点），因此直达路径并不落在
+`dist/c·fs` 处，而在 `dist/c·fs + 40`。所以时延要从 RIR 峰值抽头**反推**，
+不能直接按几何距离算。见 `reference_align_params`。
 """
 
 from __future__ import annotations
@@ -272,6 +286,66 @@ def convolve_rir(signal: np.ndarray, rir: np.ndarray) -> np.ndarray:
     return y[: len(signal)]
 
 
+def direct_path_peak(rir: np.ndarray, geom_delay: float,
+                     lo_margin: int = 10, hi_margin: int = 200) -> int:
+    """在「几何直达时延」附近的小窗口里找直达路径所在的抽头。
+
+    上界放宽到 +200 点是为了容纳 pyroomacoustics 的固定群延迟（实测 40 点），
+    下界留 10 点余量。
+
+    **刻意不用全局 argmax**：混响强时某个反射的幅度可能超过直达路径，
+    全局取峰会锚到错误的时刻，整条参考信号就错位了。
+    """
+    rir = np.asarray(rir)
+    lo = max(0, int(geom_delay) - lo_margin)
+    hi = min(len(rir), int(geom_delay) + hi_margin)
+    if hi <= lo:
+        raise ValueError(f"RIR 太短（{len(rir)} 点），无法定位直达路径")
+    return lo + int(np.argmax(np.abs(rir[lo:hi])))
+
+
+def reference_align_params(room_cfg: RoomConfig, cfg: SimConfig,
+                           rirs: np.ndarray) -> tuple[int, float]:
+    """参考信号的对齐时延（采样点）与直达路径增益。
+
+    时延是干声到达**阵列中心**的时刻——波束形成器的输出对齐的正是阵列中心
+    （DS 只补偿阵元间的相对时延），参考信号必须用同一个参考点。
+
+    由 RIR 峰值抽头反推群延迟偏移，而不是直接按 `dist/c·fs` 算，
+    因为 pyroomacoustics 的 RIR 含一个与距离无关的固定群延迟。
+    """
+    center_xy = array_center(room_cfg)
+    mic0 = mic_positions(cfg.array, center_xy)[:, 0]
+    center = np.array([center_xy[0], center_xy[1], cfg.array.height])
+
+    d_mic0 = float(np.linalg.norm(room_cfg.source_pos - mic0))
+    d_center = float(np.linalg.norm(room_cfg.source_pos - center))
+
+    rir = np.asarray(rirs[0, 0])
+    geom = d_mic0 / SPEED_OF_SOUND * cfg.sample_rate
+    peak = direct_path_peak(rir, geom)
+    gain = float(np.abs(rir[peak]))
+
+    offset = peak - geom                     # pyroomacoustics 的固定群延迟（采样点）
+    delay = int(round(d_center / SPEED_OF_SOUND * cfg.sample_rate + offset))
+    return delay, gain
+
+
+def align_reference(clean: np.ndarray, delay: int,
+                    gain: float = 1.0) -> np.ndarray:
+    """把干声按 delay 个采样点延迟，作为评估用参考信号。
+
+    gain 取直达路径幅度（球面扩散）。SI-SDR 尺度不变，故它只影响
+    PESQ / STOI 这类对电平敏感（或部分敏感）的指标。
+    """
+    out = np.zeros_like(clean)
+    if delay <= 0:
+        out[:] = clean * gain
+    elif delay < len(clean):
+        out[delay:] = clean[: len(clean) - delay] * gain
+    return out
+
+
 def measure_snr(clean_ref: np.ndarray, noise_ref: np.ndarray) -> float:
     """参考通道上的信噪比（dB）。"""
     c = float(np.linalg.norm(clean_ref))
@@ -333,13 +407,18 @@ def simulate_sample(clean: np.ndarray, noise: np.ndarray, cfg: SimConfig,
     noise_multi = noise_multi * scale
     multi_ch = clean_multi + noise_multi
 
+    # 参考信号：干声对齐到阵列中心的直达路径到达时刻（见模块 docstring）
+    ref_delay, ref_gain = reference_align_params(room_cfg, cfg, rirs)
+    clean_ref = align_reference(clean, ref_delay, ref_gain)
+
     return {
         "multi_ch": multi_ch,
-        "clean_ref": clean,
+        "clean_ref": clean_ref,
         "noise_multi": noise_multi,
         "doa_true": position_to_azimuth(room_cfg.source_pos,
                                         array_center(room_cfg)),
         "snr_db": measure_snr(clean_multi[0], noise_multi[0]),
+        "ref_delay": ref_delay,
         "room": room_cfg,
     }
 
