@@ -123,8 +123,7 @@ def extract(archive: Path, dest_dir: Path) -> None:
 def fetch_librispeech(subsets: list[str]) -> None:
     for name in subsets:
         url = LIBRISPEECH_URLS[name]
-        target_dir = DATA_ROOT / "LibriSpeech"
-        marker = target_dir / name
+        marker = DATA_ROOT / "LibriSpeech" / name
 
         if marker.exists():
             print(f"[LibriSpeech/{name}] 已存在，跳过")
@@ -132,7 +131,9 @@ def fetch_librispeech(subsets: list[str]) -> None:
 
         print(f"[LibriSpeech/{name}] 下载中 ...")
         archive = download(url, DATA_ROOT / f"{name}.tar.gz")
-        extract(archive, target_dir)
+        # 压缩包内层已经带 LibriSpeech/ 前缀，解到 data/ 即可。
+        # 若解到 data/LibriSpeech/ 会多出一层嵌套（data/LibriSpeech/LibriSpeech/dev-clean）。
+        extract(archive, DATA_ROOT)
 
 
 def _demand_already_extracted(env: str) -> bool:
@@ -153,12 +154,15 @@ def fetch_demand(envs: list[str]) -> None:
             continue
 
         print(f"[DEMAND/{env}] 下载中 ...")
+        # 压缩包名必须带 _16k 后缀（见 docs/DATASETS.md），手动下载放入时也是这个文件名
+        archive_path = DATA_ROOT / f"{env}_16k.zip"
         try:
-            archive = download(DEMAND_URL.format(env=env), DATA_ROOT / f"{env}.zip")
+            archive = download(DEMAND_URL.format(env=env), archive_path)
         except urllib.error.URLError:
             print(f"  跳过 {env}（网络问题，可稍后重跑本脚本）")
             continue
-        extract(archive, target_dir)
+        # zip 内层是 DKITCHEN/ 这类目录，解到 data/DEMAND/ 之下
+        extract(archive, DATA_ROOT / "DEMAND")
 
 
 def _wav_duration(paths) -> float:
