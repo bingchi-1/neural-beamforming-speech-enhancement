@@ -230,3 +230,70 @@ def test_grid_requires_both_levels(tiny_corpus):
     with pytest.raises(ValueError, match="snr_levels"):
         spec = _spec(root, snr_levels=(-5.0,))       # 少了 t60_levels
         generate_grid(utterances, noise_files, sim_cfg, spec, n_utterances=2)
+
+
+# ── 并行生成（n_jobs > 1）───────────────────────────────────────
+# 并行的唯一风险是「结果变了」：作业顺序、随机抽样、缓存读写都可能受影响。
+# 因此核心断言是**与串行逐位一致**，而不只是「跑得通」。
+
+def test_parallel_matches_serial_bit_for_bit(tiny_corpus, tmp_path):
+    """n_jobs=2 的产出必须与 n_jobs=1 逐位一致。
+
+    这是并行化的验收标准：加速不能以改变数据为代价。若失败，优先检查
+    作业列表是否仍在主进程按同一种子生成、以及结果是否按输入顺序回收。
+    """
+    root, utterances, noise_files, sim_cfg = tiny_corpus
+
+    out_s = tmp_path / "serial"
+    rows_s = generate_batch(utterances, noise_files, sim_cfg,
+                            BatchSpec(out_dir=out_s, n_samples=6, seed=11,
+                                      n_jobs=1),
+                            cache_dir=tmp_path / "rirs_s")
+
+    out_p = tmp_path / "parallel"
+    rows_p = generate_batch(utterances, noise_files, sim_cfg,
+                            BatchSpec(out_dir=out_p, n_samples=6, seed=11,
+                                      n_jobs=2),
+                            cache_dir=tmp_path / "rirs_p")
+
+    assert len(rows_s) == len(rows_p) == 6
+
+    # manifest 逐字段一致（index 也一致：行序必须稳定）
+    for a, b in zip(rows_s, rows_p):
+        assert a == b, f"manifest 行不一致：\n  {a}\n  {b}"
+
+    # 落盘数组逐位一致
+    for a, b in zip(rows_s, rows_p):
+        with np.load(out_s / a["file"]) as za, np.load(out_p / b["file"]) as zb:
+            assert set(za.files) == set(zb.files)
+            for k in za.files:
+                np.testing.assert_array_equal(
+                    za[k], zb[k], err_msg=f"{a['file']} 的 {k} 与串行不一致")
+
+
+def test_parallel_with_one_job_is_serial_path(tiny_corpus, tmp_path):
+    """n_jobs=1 与缺省行为一致（走串行分支，不启动进程池）。"""
+    root, utterances, noise_files, sim_cfg = tiny_corpus
+    rows = generate_batch(utterances, noise_files, sim_cfg,
+                          BatchSpec(out_dir=tmp_path / "a", n_samples=3, seed=5),
+                          cache_dir=tmp_path / "rirs")
+    assert len(rows) == 3
+    assert (tmp_path / "a" / "manifest.csv").exists()
+
+
+def test_run_config_records_max_order_cap(tiny_corpus, tmp_path):
+    """run.json 必须记录 max_order_cap —— 改口径后要能追溯每批数据用的什么。
+
+    若不记录，日后看到 RIR 抽头数变化将无从判断是配置改了还是出了 bug。
+    """
+    import json
+
+    root, utterances, noise_files, sim_cfg = tiny_corpus
+    out = tmp_path / "out"
+    generate_batch(utterances, noise_files, sim_cfg,
+                   BatchSpec(out_dir=out, n_samples=2, seed=3),
+                   cache_dir=tmp_path / "rirs")
+
+    cfg = json.loads((out / "run.json").read_text(encoding="utf-8"))
+    assert "max_order_cap" in cfg, "run.json 未记录 max_order_cap"
+    assert cfg["max_order_cap"] == sim_cfg.max_order_cap

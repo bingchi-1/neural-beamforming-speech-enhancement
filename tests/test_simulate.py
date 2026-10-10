@@ -156,6 +156,78 @@ def test_array_signature_tracks_geometry():
             f"{change} 没有改变阵列签名"
 
 
+def test_array_signature_tracks_max_order_cap():
+    """RIR 缓存文件名必须随 max_order_cap 变化。
+
+    改上限会改变 RIR 的抽头数与拖尾。若不计入签名，改了口径后会读到旧口径的
+    缓存，新旧 RIR 混在同一批数据里且**不会有任何报错**——只是结果悄悄失真。
+    这条测试保证旧缓存会自动失效。
+    """
+    from nbse.data.simulate import array_signature
+
+    for cap in (12, 20, 30, 50, None):
+        assert array_signature(SimConfig(max_order_cap=cap)) != \
+            array_signature(SimConfig(max_order_cap=31)), \
+            f"max_order_cap={cap} 与 31 的签名相同，缓存不会失效"
+
+    assert array_signature(SimConfig(max_order_cap=None)) != \
+        array_signature(SimConfig(max_order_cap=30)), "None（完整仿真）必须与 30 区分"
+    # 同值稳定
+    assert array_signature(SimConfig(max_order_cap=30)) == \
+        array_signature(SimConfig(max_order_cap=30))
+
+
+def test_max_order_cap_actually_shrinks_rir_and_keeps_energy():
+    """上限确实降低仿真规模，且几乎不损失 RIR 能量。
+
+    两条容易被写错的性质，都在这里有断言：
+      1. 自然阶数 **低于** 上限时，上限必须**不改变任何东西**（等价于完整仿真）；
+      2. 自然阶数 **高于** 上限时才截断，且能量保留 > 99%。
+    初版测试漏了 (1)，在一个自然阶数恰好 ≤ 30 的房间上断言「结果必须不同」，
+    于是失败——那不是 bug，是把上限误当成「总会生效」。
+    """
+    pytest.importorskip("pyroomacoustics")
+    import pyroomacoustics as pra
+    from nbse.data.simulate import _room_and_rirs, sample_room
+
+    rng = np.random.default_rng(20)
+    cfg_full = SimConfig(max_order_cap=None)
+    room = sample_room(cfg_full, rng)
+
+    natural = pra.inverse_sabine(room.t60, room.size)[1]
+    rir_full = _room_and_rirs(room, cfg_full, n_sources=2)
+
+    # (1) 上限高于自然阶数 → 必须与完整仿真逐位相同
+    rir_high = _room_and_rirs(room, SimConfig(max_order_cap=natural + 5),
+                              n_sources=2)
+    np.testing.assert_array_equal(
+        rir_full, rir_high,
+        err_msg="上限高于自然阶数时不应改变结果（否则说明截断逻辑写错了）")
+
+    # 找一个自然阶数明显超过 30 的房间来验证截断效果
+    cfg_cap = SimConfig(max_order_cap=30)
+    big = None
+    for _ in range(40):
+        cand = sample_room(cfg_full, rng)
+        if pra.inverse_sabine(cand.t60, cand.size)[1] > 30:
+            big = cand
+            break
+    if big is None:
+        pytest.skip("这一批随机房间里没有自然阶数 > 30 的，无法验证截断")
+
+    full = _room_and_rirs(big, cfg_full, n_sources=2)
+    cap = _room_and_rirs(big, cfg_cap, n_sources=2)
+
+    assert cap.shape[-1] < full.shape[-1], \
+        f"截断后 RIR 应变短：{cap.shape[-1]} vs {full.shape[-1]}"
+
+    L = max(full.shape[-1], cap.shape[-1])
+    a = np.zeros((*full.shape[:2], L)); a[..., :full.shape[-1]] = full
+    b = np.zeros((*cap.shape[:2], L)); b[..., :cap.shape[-1]] = cap
+    energy = np.linalg.norm(b) / np.linalg.norm(a)
+    assert energy > 0.99, f"能量保留仅 {energy:.4f}，截断丢掉了有效信息"
+
+
 # ── 2. 端到端仿真（需要 pyroomacoustics）────────────────────────
 
 @pytest.fixture
