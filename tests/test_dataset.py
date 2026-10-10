@@ -212,6 +212,40 @@ def test_limit_truncates(fake_data):
     assert len(ds) == 3
 
 
+def test_full_length_segment_makes_random_crop_a_noop(fake_data):
+    """片段长度等于整条样本时，随机裁剪必须退化为「取整条」。
+
+    这是长片段实验的前提：`random_crop=True` 下若片段不短于样本，
+    total - segment_length + 1 == 0 会让 rng.integers(0, 0) 报错（或取到
+    长度 0）。`train.py` 因此在 full_sample 时关闭随机裁剪，本测试锁住
+    数据集这一侧的行为——即此时无论 epoch 如何变，取到的都是同一条全长样本。
+    """
+    total = 64000                     # fake_data 里每条样本就是 64000 点
+    ds = NbseDataset(fake_data, segment_length=total, random_crop=True, seed=3)
+
+    ds.set_epoch(0)
+    a = ds[0]
+    assert a["meta"]["start"] == 0
+    assert a["mag"].shape[-1] == segment_frames(total)
+
+    for e in (1, 5, 50):
+        ds.set_epoch(e)
+        b = ds[0]
+        assert b["meta"]["start"] == 0, "片段已覆盖整条，起点必须恒为 0"
+        np.testing.assert_array_equal(a["mag"], b["mag"])
+
+
+def test_segment_longer_than_sample_is_rejected(fake_data):
+    """片段长于样本时必须报错，而不是静默循环补齐。
+
+    `_fit_segment` 对不足长度会循环平铺，那会造出「句尾接句首」的假音频。
+    与其静默产出错误数据，不如直接拦住。
+    """
+    ds = NbseDataset(fake_data, segment_length=64000 + 128, random_crop=False)
+    with pytest.raises(ValueError, match="超过样本长度"):
+        ds[0]
+
+
 def test_empty_limit_raises(fake_data):
     with pytest.raises(ValueError, match="为空"):
         NbseDataset(fake_data, limit=0)

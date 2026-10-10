@@ -82,17 +82,47 @@ def build_model(preset: str, n_mics: int, n_freqs: int):
     return MODEL_PRESETS[preset](n_mics=n_mics, n_freqs=n_freqs)
 
 
+def _sample_length(data_dir: Path) -> int:
+    """读 manifest 首条的样本长度（采样点）。
+
+    用于判断请求的片段长度是否已经达到整条样本，从而决定能否随机裁剪。
+    直接读 manifest 而不加载 npz，避免为此打开一个 2 MB 文件。
+    """
+    import csv
+
+    path = Path(data_dir) / "manifest.csv"
+    if not path.exists():
+        raise SystemExit(
+            f"找不到 {path}\n请先生成样本：\n"
+            f"  python scripts/generate_dataset.py --split train --n 3000 --jobs 8")
+    with open(path, newline="", encoding="utf-8") as f:
+        row = next(csv.DictReader(f), None)
+    if row is None or "n_samples" not in row:
+        raise SystemExit(f"{path} 为空或缺 n_samples 列")
+    return int(row["n_samples"])
+
+
 def build_loaders(args, cfg: TrainConfig, overfit: bool):
     """构建训练/验证 DataLoader。
 
     过拟合测试的关键点是 **random_crop=False**（关掉时域增广）：
     若仍开随机片段，同一 epoch 内每次取到的都是不同片段，模型在「背下 10 条
     样本」之前会先被无限变动的输入拖住，loss 下降曲线失去判读意义。
+
+    片段长度达到整条样本长度时也必须关掉随机裁剪：样本只有 4 s，
+    再随机取「4 s 片段」是没有意义的（只会取到整条）。
     """
+    # 用一条样本的实际长度判断，而不是硬编码 4 s——CLI 允许 --segment-length
+    sample_len = _sample_length(_resolve(args.data))
+    full_sample = cfg.segment_length >= sample_len
+    if full_sample:
+        print(f"片段 {cfg.segment_length} ≥ 样本长度 {sample_len}："
+              f"使用整条样本，关闭随机片段裁剪")
+
     train_ds = NbseDataset(
         _resolve(args.data),
         segment_length=cfg.segment_length,
-        random_crop=not overfit,
+        random_crop=(not overfit) and (not full_sample),
         limit=OVERFIT_N if overfit else args.limit,
         seed=cfg.seed,
     )

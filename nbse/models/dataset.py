@@ -247,6 +247,15 @@ class NbseDataset:
         arrs = self._arrays(i)
         total = arrs["multi_ch"].shape[1]
 
+        # 片段长于样本时**必须报错**，不能落到 _fit_segment 的循环平铺分支——
+        # 那会把句尾接回句首，造出一段语法上合法、内容上荒谬的音频，
+        # 而且不会报任何错，只会让训练指标悄悄变差。
+        if self.segment_length > total:
+            raise ValueError(
+                f"请求的片段长度 {self.segment_length} 超过样本长度 {total}"
+                f"（{self.rows[i]['file']}）。请把 segment_length 降到 {total} 以内。"
+            )
+
         if self.random_crop:
             # 每条样本用 (base_seed, epoch, i) 派生窗口，与 DataLoader 的
             # worker 调度无关——不依赖 numpy 全局随机态，因此 num_workers>0 也可复现
@@ -255,6 +264,7 @@ class NbseDataset:
             if total > self.segment_length:
                 start = int(rng.integers(0, total - self.segment_length + 1))
             else:
+                # 片段恰好等于整条样本：只有一个合法窗口，随机裁剪退化为无操作
                 start = 0
         else:
             start = 0
