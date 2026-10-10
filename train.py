@@ -168,6 +168,9 @@ def main() -> int:
                     help="模型预设：default | small")
     ap.add_argument("--no-amp", action="store_true", help="关闭混合精度")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--no-deterministic", action="store_true",
+                    help="关闭确定性计算。默认开启：不加会让同一配置两次训练"
+                         "得到不同结果（cuDNN 卷积算法不确定），破坏可复现性")
     ap.add_argument("--resume", default=None, help="从 checkpoint 续训")
     ap.add_argument("--overfit", action="store_true",
                     help=f"T3.4 过拟合测试：{OVERFIT_N} 条样本、关增广、小模型")
@@ -196,6 +199,16 @@ def main() -> int:
 
     device = pick_device(args.device)
     torch.manual_seed(cfg.seed)
+
+    # 确定性：默认开启。实测默认设置下同一输入连续 8 次前向会得到 8 个不同结果
+    # （cuDNN 卷积算法选择不确定，最大差 ~1.6e-05），使训练与评测都不可复现。
+    # 代价约 7%（1.5 → 1.6 ms/batch）。见 nbse/determinism.py。
+    det = not args.no_deterministic
+    if det:
+        from nbse.determinism import determinism_status, enable_determinism
+
+        enable_determinism(seed=cfg.seed)
+        print(f"确定性计算：已开启 {determinism_status()}")
 
     train_ds, train_loader, val_loader = build_loaders(args, cfg, args.overfit)
 

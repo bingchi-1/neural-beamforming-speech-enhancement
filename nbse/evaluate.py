@@ -20,6 +20,7 @@ from pathlib import Path
 import numpy as np
 
 from .beamformers.delay_and_sum import DelayAndSum
+from .beamformers.mask_mvdr import MaskMVDR
 from .beamformers.mvdr import MVDR
 from .data.generate import load_manifest
 from .data.simulate import SimConfig, mic_positions
@@ -27,19 +28,68 @@ from .metrics import pesq_wb, si_sdr, stoi
 
 FS_DEFAULT = 16000
 
-# 方法名 → 实现。函数签名 (sample, mic_pos, center_xy, sim_cfg) -> 增强输出 [T]
-METHOD_IMPLS = {
-    "Noisy": lambda s, mic, c, cfg: s["multi_ch"][0],
-    "DS": lambda s, mic, c, cfg: DelayAndSum(mic, c, fs=cfg.sample_rate)
-                                  .enhance(s["multi_ch"], s["doa_true"]),
-    "MVDR (Oracle DOA)": lambda s, mic, c, cfg: MVDR(mic, c, fs=cfg.sample_rate)
-                                  .enhance(s["multi_ch"], s["doa_true"],
-                                           noise_multi=s["noise_multi"]),
+# 对角加载强度。**两条 MVDR 路线必须用同一个值**，否则测出来的是正则化强度
+# 差异而不是方法差异。
+#
+# 实测教训：`MaskMVDR` 与 `MVDR` 的类默认值曾是 1e-2 与 1e-3（相差 10 倍）。
+# 在同一个 R_n 上，仅因加载不同就让波束形成权重相对差达 0.78，SI-SDR 相差
+# 2.3 dB——足以让「谁更好」的结论完全反过来。故在此统一取值、两条路线共用。
+MVDR_LOADING = 1e-2
+
+# mask-MVDR 的用法配置。提成模块级常量而不是写在 lambda 里，
+# 这样测试能直接断言「评测用的是哪种用法」，而不必去反射 lambda 的源码。
+#
+# weighting="noise"：掩蔽**只用来估噪声协方差 R_n**，不让 R_s 参与。
+# 注意在 mode="mvdr" 下，MVDR 解 w = R_n⁻¹d/(d^H R_n⁻¹d) 本来就不含 R_s，
+# 因此 noise 与 both 在该模式下**必然给出相同结果**——这是设计使然，
+# 不是 bug。两者的区别只在 mode="gevd"（广义特征值）下才体现。
+MASK_WEIGHTING = "noise"
+MASK_MODE = "mvdr"
+
+# 基础方法：不需要训练。函数签名
+#   (sample, mic_pos, center_xy, sim_cfg, mask_predictor) -> 增强输出 [T]
+# mask_predictor 只有 mask-MVDR 会用；其余方法忽略它。
+BASE_METHOD_IMPLS = {
+    "Noisy": lambda s, mic, c, cfg, pred: s["multi_ch"][0],
+    "DS": lambda s, mic, c, cfg, pred: DelayAndSum(mic, c, fs=cfg.sample_rate)
+                                .enhance(s["multi_ch"], s["doa_true"]),
+    "MVDR (Oracle DOA)": lambda s, mic, c, cfg, pred: MVDR(
+                                mic, c, fs=cfg.sample_rate, loading=MVDR_LOADING
+                            ).enhance(s["multi_ch"], s["doa_true"],
+                                      noise_multi=s["noise_multi"]),
 }
+
+# 需要 mask_predictor 的方法（T4.1）
+MASK_METHOD_IMPLS = {
+    "mask-MVDR (Oracle DOA)": lambda s, mic, c, cfg, pred: MaskMVDR(
+        mic, c, mask_predictor=pred, fs=cfg.sample_rate,
+        loading=MVDR_LOADING, weighting=MASK_WEIGHTING, mode=MASK_MODE,
+    ).enhance(s["multi_ch"], s["doa_true"]),
+}
+
+ALL_METHOD_NAMES = list(BASE_METHOD_IMPLS) + list(MASK_METHOD_IMPLS)
+
+
+def build_method_impls(mask_predictor=None) -> dict:
+    """组装方法表。没有 mask_predictor 时**不注册** mask-MVDR。
+
+    刻意不提供「缺 predictor 就退化为 DS」的兜底：那会让
+    「神经方法优于基线」这一结论变成假的，而表面上一切正常。
+    宁可让方法名不存在、直接报错。
+    """
+    impls = dict(BASE_METHOD_IMPLS)
+    if mask_predictor is not None:
+        impls.update(MASK_METHOD_IMPLS)
+    return impls
+
+
+# 向后兼容：不带 predictor 时的默认方法表
+METHOD_IMPLS = build_method_impls(None)
 
 DEFAULT_METHODS = ["Noisy", "DS", "MVDR (Oracle DOA)"]
 
-# 指标排序检查用的期望顺序（设计文档 §3.2 第 2 条）
+# 指标排序检查用的期望顺序（设计文档 §3.2 第 2 条）。
+# mask-MVDR 不列入：T2.5 的保底交付点只要求 Noisy → DS → MVDR 单调。
 EXPECTED_ORDER = ["Noisy", "DS", "MVDR (Oracle DOA)"]
 
 
@@ -81,15 +131,27 @@ def sample_mic_positions(sample: dict, sim_cfg: SimConfig) -> tuple[np.ndarray, 
 def run_methods(data_dir: str | Path, rows: list[dict], sim_cfg: SimConfig,
                 methods: list[str] | None = None,
                 limit_per_condition: int | None = None,
-                progress=None) -> list[dict]:
+                progress=None,
+                mask_predictor=None) -> list[dict]:
     """在给定样本上跑各方法，返回逐条记录。
 
     每条记录：method / snr_db / t60 / pesq_wb / stoi / si_sdr / utterance
+
+    Parameters
+    ----------
+    mask_predictor : 可调用对象 `(multi_ch) -> mask[F, T]`。给了它才会注册
+                     mask-MVDR 两条方法；没给而 methods 里又点名要它们，
+                     会明确报「未知方法」而不是静默跳过。
     """
+    impls = build_method_impls(mask_predictor)
     methods = list(methods or DEFAULT_METHODS)
-    unknown = [m for m in methods if m not in METHOD_IMPLS]
+    unknown = [m for m in methods if m not in impls]
     if unknown:
-        raise ValueError(f"未知方法：{unknown}（可选 {sorted(METHOD_IMPLS)}）")
+        hint = ""
+        if any(m in MASK_METHOD_IMPLS for m in unknown):
+            hint = ("\n其中 mask-MVDR 需要 mask_predictor（训练好的 CRN checkpoint）。"
+                    "请用 eval.py --ckpt <path> 指定。")
+        raise ValueError(f"未知方法：{unknown}（可选 {sorted(impls)}）{hint}")
 
     if limit_per_condition is not None:
         rows = _limit_per_condition(rows, limit_per_condition)
@@ -101,7 +163,7 @@ def run_methods(data_dir: str | Path, rows: list[dict], sim_cfg: SimConfig,
         ref = sample["clean_ref"]
 
         for method in methods:
-            est = METHOD_IMPLS[method](sample, mic, center, sim_cfg)
+            est = impls[method](sample, mic, center, sim_cfg, mask_predictor)
             est = align_level(ref, est)
             snr, t60 = condition_of(row)
             records.append({
