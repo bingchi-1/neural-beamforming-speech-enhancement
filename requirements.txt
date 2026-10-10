@@ -18,6 +18,13 @@ soundfile
 pyroomacoustics
 
 # ── 评测指标 ──────────────────────────────────────────────────
+# 注意：pesq 在 PyPI 上**没有 wheel**（任何平台都只有源码包），Windows 上用
+# `pip install -r requirements.txt` 会因缺 MSVC 而编译失败——且会连带把同一批的
+# 其他包一起回滚。Windows 建议改用 conda-forge 的预编译版：
+#
+#   conda install -c conda-forge --no-deps pesq
+#
+# （--no-deps 避免它顺带改动 numpy/scipy）。Linux/macOS 有编译环境时 pip 可正常安装。
 pesq
 pystoi
 
