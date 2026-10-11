@@ -13,11 +13,16 @@
     python eval.py --data data/sim/test --ckpt runs/w4/best.pt \
         --out results/w4_nn.csv
 
+    # 4) 完整七行（设计文档 §6.3，T5.3 的最终对比表）
+    python eval.py --data data/sim/test \
+        --ckpt runs/w4/best.pt --dccrn runs/dccrn/best.pt \
+        --out results/final.csv
+
     # 冒烟：每个条件只取 2 条，几秒钟出结果
     python eval.py --data data/sim/test --limit 2
 
 设计文档 §6（评估设计）。`results/w2_baseline.csv` 是 T2.4 的保底交付点；
-`results/w4_nn.csv` 是 T4.3 的验收对象。
+`results/w4_nn.csv` 是 T4.3 的验收对象；`results/final.csv` 是 T5.3 的七行表。
 """
 
 from __future__ import annotations
@@ -38,6 +43,7 @@ from nbse.dsp import N_FFT  # noqa: E402
 from nbse.evaluate import (  # noqa: E402
     ALL_METHOD_NAMES,
     DEFAULT_METHODS,
+    FINAL_METHODS,
     aggregate,
     check_expected_order,
     format_table,
@@ -62,6 +68,11 @@ def main() -> int:
     ap.add_argument("--ckpt", default=None,
                     help="训练好的 CRN checkpoint（train.py 产出）。"
                          "给了它才会评测 mask-MVDR 两条方法")
+    ap.add_argument("--dccrn", default=None,
+                    help="训练好的 DCCRN-lite checkpoint（train_dccrn.py 产出）。"
+                         "给了它才会评测 DCCRN-lite（单通道对照）")
+    ap.add_argument("--dccrn-base-channels", type=int, default=16,
+                    help="DCCRN checkpoint 对应的 base_channels（须与训练时一致）")
     ap.add_argument("--model", default="default",
                     help="checkpoint 对应的模型预设：default | small")
     ap.add_argument("--methods", default=None,
@@ -100,12 +111,35 @@ def main() -> int:
         print(f"掩蔽预测器：{ckpt_path}（预设 {args.model}，设备 {args.device}）")
         print(f"确定性计算：{determinism_status()}")
 
+    # 单通道 DCCRN-lite（T5.2）：给了 checkpoint 才注册该方法
+    dccrn = None
+    if args.dccrn:
+        from nbse.determinism import enable_determinism
+        from nbse.models.dccrn_data import TorchDCCRN
+
+        d_path = _resolve(args.dccrn)
+        if not d_path.exists():
+            print(f"找不到 DCCRN checkpoint：{d_path}", file=sys.stderr)
+            return 1
+        enable_determinism()
+        dccrn = TorchDCCRN.from_checkpoint(
+            d_path, device=args.device, n_freqs=N_FFT // 2 + 1,
+            base_channels=args.dccrn_base_channels)
+        print(f"DCCRN-lite：{d_path}（设备 {args.device}）")
+
     if args.methods:
         methods = [m.strip() for m in args.methods.split(",") if m.strip()]
-    elif mask_predictor is not None:
-        methods = ALL_METHOD_NAMES
     else:
-        methods = DEFAULT_METHODS
+        # 默认按「有哪些资源」决定跑多少行：
+        #   两个 checkpoint 都给 → 设计文档 §6.3 的完整七行
+        #   只给 CRN           → 基线 + mask-MVDR 两条
+        #   都不给             → 纯基线四条
+        if mask_predictor is not None and dccrn is not None:
+            methods = FINAL_METHODS
+        elif mask_predictor is not None:
+            methods = [m for m in ALL_METHOD_NAMES if m != "DCCRN-lite"]
+        else:
+            methods = DEFAULT_METHODS
 
     print(f"样本目录：{data_dir}")
     print(f"样本数：{len(rows)}")
@@ -125,7 +159,7 @@ def main() -> int:
 
     records = run_methods(data_dir, rows, sim_cfg, methods=methods,
                           limit_per_condition=args.limit, progress=_progress,
-                          mask_predictor=mask_predictor)
+                          mask_predictor=mask_predictor, dccrn=dccrn)
     print(f"\n完成，用时 {time.time() - t0:.1f} s")
 
     table_rows = aggregate(records)
