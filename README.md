@@ -32,7 +32,9 @@ Metrics are computed with determinism enabled, so the table is bit-reproducible.
 
 1. **The array is worth a lot.** The best array method beats single-channel `Noisy` by
    **7.7 dB** SI-SDR, and beats the best single-channel neural method (`DCCRN-lite`) by
-   **16.7 dB**.
+   **6.7 dB**. Notably, `DCCRN-lite` is a 4.0 M-parameter complex-domain network and still
+   loses to an MVDR beamformer that requires no training at all — spatial information is a
+   dimension that a bigger single-channel network does not recover.
 2. **Estimating DOA is not free.** `MVDR` loses **4.1 dB** going from oracle DOA to
    GCC-PHAT DOA. The figure below shows where that loss comes from.
 3. **Mask-based MVDR does not beat oracle-noise MVDR — and it should not.** This is
