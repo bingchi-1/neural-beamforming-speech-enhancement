@@ -36,7 +36,10 @@ Metrics are computed with determinism enabled, so the table is bit-reproducible.
 2. **Estimating DOA is not free.** `MVDR` loses **4.1 dB** going from oracle DOA to
    GCC-PHAT DOA. The figure below shows where that loss comes from.
 3. **Mask-based MVDR does not beat oracle-noise MVDR — and it should not.** This is
-   explained honestly in [Two results that did not go as planned](#two-results-that-did-not-go-as-planned).
+   explained in [Two results that did not go as planned](#two-results-that-did-not-go-as-planned).
+4. **`mask-MVDR` should not be used at low SNR.** Below roughly 0 dB it is worse than the
+   unprocessed input. This is a real limitation of the method as implemented, quantified in
+   [Known limitations](#known-limitations) — please read it before using this method.
 
 ---
 
@@ -147,6 +150,65 @@ that field raises a warning instead of silently using the wrong length.
 
 After the fix DCCRN-lite beats `Noisy` on all three metrics (PESQ 1.083 → 1.191,
 STOI 0.678 → 0.691, SI-SDR −10.49 → −9.51 dB).
+
+---
+
+## Known limitations
+
+### mask-MVDR becomes worse than doing nothing at low SNR
+
+This is the most consequential limitation in the project, and it is **not fixed** — it is
+documented so that it is not mistaken for a working method.
+
+Mean SI-SDR by input SNR:
+
+| Input SNR | Noisy | MVDR (GCC-PHAT) | mask-MVDR (GCC-PHAT) | Mask compounding penalty |
+|---|---|---|---|---|
+| +5 dB | −7.81 | −1.59 | −2.74 | −1.15 dB |
+| 0 dB | −10.04 | −7.47 | **−10.58** | −3.11 dB |
+| −5 dB | −13.63 | −11.70 | **−18.81** | **−7.11 dB** |
+
+At 0 dB and −5 dB, `mask-MVDR (GCC-PHAT)` is **worse than the unprocessed input**. The
+worst single condition (SNR −5 dB, T60 0.6 s) reaches −19.81 dB against −15.62 dB for
+`Noisy`. Only at +5 dB does it clearly help.
+
+The last column is the diagnostic that matters: it is the gap between mask-MVDR and plain
+MVDR **at the same DOA estimate**, so it isolates the effect of the mask. That penalty
+grows from −1.15 dB at +5 dB to −7.11 dB at −5 dB. In other words, **mask estimation error
+and DOA estimation error do not act independently — they compound**, and the compounding
+gets worse exactly where the mask is least reliable.
+
+The mechanism is consistent with the DOA analysis above: at low SNR the GCC-PHAT estimate
+is often tens of degrees off (median 54.8° at −5 dB). A mask-weighted covariance estimated
+from that same low-SNR observation is itself noisy, so the MVDR weights are built from a
+mis-steered array *and* a poorly conditioned covariance. The failure is not graceful.
+
+**What would plausibly fix it** (untested, listed for completeness):
+
+- temporal smoothing or multi-frame joint DOA estimation instead of a single full-utterance
+  estimate, so a few bad frames cannot dominate
+- tracking the DOA and holding the last confident estimate when the current frame's
+  confidence is low, rather than trusting every estimate
+- restricting the mask to a trusted time-frequency region, or falling back to plain MVDR
+  when an SNR/confidence criterion is not met
+
+**Practical implication:** this method should not be used at low SNR without a
+confidence-based fallback. `MVDR (GCC-PHAT)` degrades far more gracefully and is the
+better choice below roughly 0 dB.
+
+### Other limitations
+
+- **Mask-MVDR uses ground-truth noise covariance.** The comparison against
+  `MVDR (oracle DOA)` is not a fair one (see above). A fully fair evaluation would estimate
+  the noise covariance from the mask as well — that variant is not implemented.
+- **Simulated data only.** No real array recordings; the conclusions hold for the
+  image-source model used here, with a 4 cm circular array and speech-shaped noise.
+- **DOA estimation is single-source.** The estimator assumes one dominant source; it is not
+  evaluated with concurrent talkers or moving sources.
+- **The array is small (4 cm radius).** At speech frequencies this gives limited
+  directivity even for MVDR (visible in the beampattern above), so the absolute gains are
+  not representative of larger arrays.
+
 
 ---
 
