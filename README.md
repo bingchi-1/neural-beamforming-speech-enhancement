@@ -175,6 +175,19 @@ beamforming look artificially effective.
 
 ## Quick start
 
+**One command** (idempotent — existing artifacts are skipped, so a failed run can be
+resumed by re-running it):
+
+```bash
+python scripts/reproduce.py all      # download -> generate -> train -> evaluate -> figures
+python scripts/reproduce.py --smoke  # end-to-end self-check on tiny data (minutes)
+```
+
+`--smoke` exercises every stage at small scale to verify the pipeline itself. It is
+**not** a source of reportable numbers — the tables above come from a full `all` run.
+
+**Manual steps**, if you prefer to run them individually:
+
 **GPU note:** RTX 50-series (Blackwell, sm_120) needs a CUDA 12.8+ build of PyTorch and
 `torch >= 2.7`.
 
@@ -256,7 +269,7 @@ nbse/                  source (tracked)
   training.py          training loop, losses, checkpointing
   determinism.py       bit-reproducible evaluation
 configs/default.yaml   all simulation and training parameters
-scripts/               data download, sample generation, figures
+scripts/               data download, sample generation, figures, one-command reproduction
 tests/                 265 tests
 train.py               multi-channel CRN training entry point
 train_dccrn.py         single-channel DCCRN-lite training entry point
