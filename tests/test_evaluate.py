@@ -17,6 +17,7 @@ from nbse.dsp import N_FFT, stft
 from nbse.evaluate import (
     ALL_METHOD_NAMES,
     DEFAULT_METHODS,
+    FINAL_METHODS,
     aggregate,
     align_level,
     build_method_impls,
@@ -191,13 +192,31 @@ def test_mask_methods_not_registered_without_predictor():
     """
     impls = build_method_impls(None)
     assert "mask-MVDR (Oracle DOA)" not in impls
-    assert set(impls) == {"Noisy", "DS", "MVDR (Oracle DOA)"}
+    assert "mask-MVDR (GCC-PHAT)" not in impls
+    # 只应剩三条不需训练、也不需要神经网络资源的方法
+    assert set(impls) == {"Noisy", "DS", "MVDR (Oracle DOA)", "MVDR (GCC-PHAT)"}
 
 
-def test_mask_methods_registered_with_predictor():
+def test_dccrn_not_registered_without_checkpoint():
+    """没有 DCCRN checkpoint 时不应注册 DCCRN-lite —— 同样的理由。"""
     impls = build_method_impls(lambda multi_ch: None)
-    assert "mask-MVDR (Oracle DOA)" in impls
-    assert set(ALL_METHOD_NAMES) <= set(impls)
+    assert "DCCRN-lite" not in impls
+
+
+def test_all_methods_registered_with_all_resources():
+    """两类资源都给齐时，应注册设计文档 §6.3 的**全部七行**。"""
+    impls = build_method_impls(lambda multi_ch: None, dccrn=object())
+    assert set(FINAL_METHODS) <= set(impls), \
+        f"缺少方法：{set(FINAL_METHODS) - set(impls)}"
+    assert len(FINAL_METHODS) == 7
+
+
+def test_every_final_method_is_registered_when_resources_present():
+    """七行表的每一项都必须真的有实现，且都能在资源齐全时注册。"""
+    impls = build_method_impls(lambda mc: None, dccrn=object())
+    for name in FINAL_METHODS:
+        assert name in impls, f"{name} 没有实现"
+        assert callable(impls[name])
 
 
 def test_requesting_mask_method_without_predictor_names_the_cause(eval_dir):
@@ -286,7 +305,9 @@ def test_mask_and_plain_mvdr_share_the_same_loading():
         cls.__init__ = spy
         try:
             try:
-                table[name](sample, mic, (0.0, 0.0), cfg, pred)
+                # 第 5 个参数是 ctx（dict），不再是裸的 predictor
+                table[name](sample, mic, (0.0, 0.0), cfg,
+                            {"mask_predictor": pred})
             except Exception:
                 pass          # 只关心传了什么参数，不关心后续计算
         finally:
@@ -391,7 +412,8 @@ def test_mask_method_impl_receives_weighting(monkeypatch, eval_dir):
     n_freqs = N_FFT // 2 + 1
     T = stft(np.zeros(8000)).shape[1]
     MASK_METHOD_IMPLS["mask-MVDR (Oracle DOA)"](
-        sample, mic, (0.0, 0.0), cfg, lambda mc: np.full((n_freqs, T), 0.5))
+        sample, mic, (0.0, 0.0), cfg,
+        {"mask_predictor": lambda mc: np.full((n_freqs, T), 0.5)})
 
     assert seen.get("weighting") == "noise"
     assert seen.get("mode") == "mvdr"

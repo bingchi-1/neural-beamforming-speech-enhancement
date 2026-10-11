@@ -20,6 +20,7 @@ from pathlib import Path
 import numpy as np
 
 from .beamformers.delay_and_sum import DelayAndSum
+from .beamformers.doa import estimate_doa
 from .beamformers.mask_mvdr import MaskMVDR
 from .beamformers.mvdr import MVDR
 from .data.generate import load_manifest
@@ -61,39 +62,77 @@ MASK_WEIGHTING = "noise"
 MASK_MODE = "mvdr"
 
 # 基础方法：不需要训练。函数签名
-#   (sample, mic_pos, center_xy, sim_cfg, mask_predictor) -> 增强输出 [T]
-# mask_predictor 只有 mask-MVDR 会用；其余方法忽略它。
+#   (sample, mic_pos, center_xy, sim_cfg, ctx) -> 增强输出 [T]
+# `ctx` 是 dict，携带可选资源：mask_predictor / dccrn。各方法按需取用，
+# 不用它就忽略——这样签名统一，新增方法不必改所有调用点。
+def _ctx_get(ctx, key):
+    return None if ctx is None else ctx.get(key)
+
+
+def _est_doa(s, mic, cfg):
+    """估计方位角（GCC-PHAT）。DOA 只依赖观测与几何，与 `doa_true` 无关。"""
+    return estimate_doa(s["multi_ch"], mic, fs=cfg.sample_rate)
+
+
 BASE_METHOD_IMPLS = {
-    "Noisy": lambda s, mic, c, cfg, pred: s["multi_ch"][0],
-    "DS": lambda s, mic, c, cfg, pred: DelayAndSum(mic, c, fs=cfg.sample_rate)
+    "Noisy": lambda s, mic, c, cfg, ctx: s["multi_ch"][0],
+    "DS": lambda s, mic, c, cfg, ctx: DelayAndSum(mic, c, fs=cfg.sample_rate)
                                 .enhance(s["multi_ch"], s["doa_true"]),
-    "MVDR (Oracle DOA)": lambda s, mic, c, cfg, pred: MVDR(
+    "MVDR (Oracle DOA)": lambda s, mic, c, cfg, ctx: MVDR(
                                 mic, c, fs=cfg.sample_rate, loading=MVDR_LOADING
                             ).enhance(s["multi_ch"], s["doa_true"],
+                                      noise_multi=s["noise_multi"]),
+    # 与上一行**唯一**的差别是 DOA 来自估计而非真值。噪声协方差仍用真值噪声，
+    # 因此这一对比较量化的是纯粹的「DOA 估计误差代价」。
+    "MVDR (GCC-PHAT)": lambda s, mic, c, cfg, ctx: MVDR(
+                                mic, c, fs=cfg.sample_rate, loading=MVDR_LOADING
+                            ).enhance(s["multi_ch"], _est_doa(s, mic, cfg),
                                       noise_multi=s["noise_multi"]),
 }
 
 # 需要 mask_predictor 的方法（T4.1）
 MASK_METHOD_IMPLS = {
-    "mask-MVDR (Oracle DOA)": lambda s, mic, c, cfg, pred: MaskMVDR(
-        mic, c, mask_predictor=pred, fs=cfg.sample_rate,
+    "mask-MVDR (Oracle DOA)": lambda s, mic, c, cfg, ctx: MaskMVDR(
+        mic, c, mask_predictor=_ctx_get(ctx, "mask_predictor"),
+        fs=cfg.sample_rate,
         loading=MVDR_LOADING, weighting=MASK_WEIGHTING, mode=MASK_MODE,
     ).enhance(s["multi_ch"], s["doa_true"]),
+    "mask-MVDR (GCC-PHAT)": lambda s, mic, c, cfg, ctx: MaskMVDR(
+        mic, c, mask_predictor=_ctx_get(ctx, "mask_predictor"),
+        fs=cfg.sample_rate,
+        loading=MVDR_LOADING, weighting=MASK_WEIGHTING, mode=MASK_MODE,
+    ).enhance(s["multi_ch"], _est_doa(s, mic, cfg)),
 }
 
-ALL_METHOD_NAMES = list(BASE_METHOD_IMPLS) + list(MASK_METHOD_IMPLS)
+# 需要 DCCRN-lite checkpoint 的方法（T5.2）
+DCCRN_METHOD_IMPLS = {
+    "DCCRN-lite": lambda s, mic, c, cfg, ctx: _ctx_get(ctx, "dccrn")
+                                .enhance(s["multi_ch"]),
+}
+
+ALL_METHOD_NAMES = (list(BASE_METHOD_IMPLS) + list(MASK_METHOD_IMPLS)
+                    + list(DCCRN_METHOD_IMPLS))
+
+# 设计文档 §6.3 的最终七行，按方法依赖排序
+FINAL_METHODS = ["Noisy", "DS", "MVDR (Oracle DOA)", "MVDR (GCC-PHAT)",
+                 "mask-MVDR (Oracle DOA)", "mask-MVDR (GCC-PHAT)", "DCCRN-lite"]
 
 
-def build_method_impls(mask_predictor=None) -> dict:
-    """组装方法表。没有 mask_predictor 时**不注册** mask-MVDR。
+def build_method_impls(mask_predictor=None, dccrn=None) -> dict:
+    """组装方法表，按可用资源注册。
 
-    刻意不提供「缺 predictor 就退化为 DS」的兜底：那会让
-    「神经方法优于基线」这一结论变成假的，而表面上一切正常。
-    宁可让方法名不存在、直接报错。
+    * 没有 `mask_predictor` → **不注册** mask-MVDR 两条
+    * 没有 `dccrn` → **不注册** DCCRN-lite
+
+    刻意不提供「缺资源就退化为基线」的兜底：那会让「神经方法优于基线」
+    这类结论变成假的，而表面上一切正常（结果表照常产出）。宁可让方法名
+    不存在、直接报错。
     """
     impls = dict(BASE_METHOD_IMPLS)
     if mask_predictor is not None:
         impls.update(MASK_METHOD_IMPLS)
+    if dccrn is not None:
+        impls.update(DCCRN_METHOD_IMPLS)
     return impls
 
 
@@ -146,7 +185,8 @@ def run_methods(data_dir: str | Path, rows: list[dict], sim_cfg: SimConfig,
                 methods: list[str] | None = None,
                 limit_per_condition: int | None = None,
                 progress=None,
-                mask_predictor=None) -> list[dict]:
+                mask_predictor=None,
+                dccrn=None) -> list[dict]:
     """在给定样本上跑各方法，返回逐条记录。
 
     每条记录：method / snr_db / t60 / pesq_wb / stoi / si_sdr / utterance
@@ -154,17 +194,23 @@ def run_methods(data_dir: str | Path, rows: list[dict], sim_cfg: SimConfig,
     Parameters
     ----------
     mask_predictor : 可调用对象 `(multi_ch) -> mask[F, T]`。给了它才会注册
-                     mask-MVDR 两条方法；没给而 methods 里又点名要它们，
-                     会明确报「未知方法」而不是静默跳过。
+                     mask-MVDR；没给而 methods 里又点名要它，会明确报错。
+    dccrn          : 单通道增强器 `enhance(multi_ch) -> waveform`。给了它才会
+                     注册 `DCCRN-lite`。
+    两者都可以缺省；缺省时对应方法**不存在**，而不是退化成基线。
     """
-    impls = build_method_impls(mask_predictor)
+    ctx = {"mask_predictor": mask_predictor, "dccrn": dccrn}
+    impls = build_method_impls(mask_predictor, dccrn)
     methods = list(methods or DEFAULT_METHODS)
     unknown = [m for m in methods if m not in impls]
     if unknown:
         hint = ""
         if any(m in MASK_METHOD_IMPLS for m in unknown):
-            hint = ("\n其中 mask-MVDR 需要 mask_predictor（训练好的 CRN checkpoint）。"
-                    "请用 eval.py --ckpt <path> 指定。")
+            hint += ("\n其中 mask-MVDR 需要 mask_predictor（训练好的 CRN checkpoint）。"
+                     "请用 eval.py --ckpt <path> 指定。")
+        if any(m in DCCRN_METHOD_IMPLS for m in unknown):
+            hint += ("\n其中 DCCRN-lite 需要单通道 checkpoint。"
+                     "请用 eval.py --dccrn <path> 指定。")
         raise ValueError(f"未知方法：{unknown}（可选 {sorted(impls)}）{hint}")
 
     if limit_per_condition is not None:
@@ -177,7 +223,7 @@ def run_methods(data_dir: str | Path, rows: list[dict], sim_cfg: SimConfig,
         ref = sample["clean_ref"]
 
         for method in methods:
-            est = impls[method](sample, mic, center, sim_cfg, mask_predictor)
+            est = impls[method](sample, mic, center, sim_cfg, ctx)
             est = align_level(ref, est)
             snr, t60 = condition_of(row)
             records.append({
