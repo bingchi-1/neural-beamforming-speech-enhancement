@@ -313,6 +313,61 @@ def test_eval_uses_the_measured_best_mask_weighting():
     assert MASK_MODE == "mvdr"
 
 
+def test_mvdr_loading_stays_in_the_validated_range():
+    """`MVDR_LOADING` 必须落在实测验证过的区间内。
+
+    这不是形式检查——该值两端都有实测的失效模式：
+
+    * **过大**（≥1e-2）：两条 MVDR 路线各损失约 1.9 dB（验证集上 mask-MVDR
+      从 −2.507 退化到 −4.345），等于白扔性能。
+    * **过小**（≤1e-5）：性能不再提升，但正则化后的条件数爆炸
+      （1e-6 时单频点 cond p99 达 3.97×10⁶、权重范数 326），
+      大权重会放大导向矢量与实际传递函数的失配，混响更强或 DOA 有误差时很脆弱。
+
+    实测（40 条测试样本）：
+        loading    cond(正则化后) p99    ‖w‖max
+          1e-6       3,967,372          326
+          1e-4          39,790           22
+          3e-4          13,301         16.3
+          1e-2             401          3.5
+    当前取 3e-4：性能仅比平台最优差 0.2 dB，条件数与权重范数都在安全区。
+    """
+    from nbse.evaluate import MVDR_LOADING
+
+    assert 1e-4 <= MVDR_LOADING <= 1e-3, (
+        f"MVDR_LOADING={MVDR_LOADING:g} 超出实测验证区间 [1e-4, 1e-3]。"
+        f"调大需重跑评测确认性能未退化；调小需重测条件数与权重范数。")
+
+
+def test_mvdr_loading_keeps_inverse_well_conditioned():
+    """实际检验：该 loading 下正则化后的协方差矩阵应保持可控。
+
+    比上一条更直接——不只看常量，而是真的构造一个病态的掩蔽加权协方差
+    （掩蔽接近二值会让有效帧数极少、矩阵近乎奇异），看加载后能否稳定求逆。
+    """
+    from nbse.beamformers.mask_mvdr import mask_weighted_covariance
+    from nbse.beamformers.mvdr import regularize_covariance
+    from nbse.evaluate import MVDR_LOADING
+
+    rng = np.random.default_rng(0)
+    F, T, M = 64, 40, 4
+    X = rng.normal(size=(M, F, T)) + 1j * rng.normal(size=(M, F, T))
+
+    # 制造病态：掩蔽只在少数帧为 1、其余为 0 → 噪声权重几乎全零
+    mask = np.zeros((F, T))
+    mask[:, :2] = 1.0
+    R_n = mask_weighted_covariance(X, mask)
+
+    R_reg = regularize_covariance(R_n, MVDR_LOADING)
+    conds = np.linalg.cond(R_reg)
+
+    assert np.isfinite(conds).all(), "出现非有限条件数"
+    assert np.linalg.eigvalsh(R_reg).min() > 0, "正则化后矩阵仍非正定"
+    # 阈值 1e7：1e-6 时实测 p99 已达 4e6，当前值应低一到两个量级
+    assert np.percentile(conds, 99) < 1e7, \
+        f"正则化后条件数过大（p99={np.percentile(conds, 99):.3g}），loading 可能过小"
+
+
 def test_mask_method_impl_receives_weighting(monkeypatch, eval_dir):
     """确认 lambda 真的把 weighting 传给了 MaskMVDR（而不只是常量写对）。"""
     from nbse.beamformers import mask_mvdr as mm
