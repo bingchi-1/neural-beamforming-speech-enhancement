@@ -293,12 +293,22 @@ def main() -> int:
         append_history(history_path, record)
 
         monitor = va["loss"] if va is not None else tr["loss"]
+        # segment_length 必须写进 checkpoint：推理时要按**训练时的序列长度**
+        # 切块，否则结果会严重退化（实测差 10 dB）而训练过程毫无迹象。
+        # 详见 TorchDCCRN 的 docstring。
+        ckpt_extra = {"monitor": "val" if va else "train",
+                      "monitor_value": monitor, "epoch": epoch + 1,
+                      "segment_length": cfg.segment_length,
+                      "n_freqs": train_ds.n_freqs,
+                      "base_channels": args.base_channels,
+                      "lstm_hidden": args.lstm_hidden,
+                      "use_lstm": not args.no_lstm}
         if monitor < state.best_val - 1e-12:
             state.best_val = monitor
             save_checkpoint(best_path, model, optimizer, scheduler, state, cfg,
-                            extra={"monitor": "val" if va else "train",
-                                   "monitor_value": monitor, "epoch": epoch + 1})
-        save_checkpoint(last_path, model, optimizer, scheduler, state, cfg)
+                            extra=ckpt_extra)
+        save_checkpoint(last_path, model, optimizer, scheduler, state, cfg,
+                        extra=ckpt_extra)
 
         if args.dry_run:
             print("\n--dry-run：已跑通 1 个 batch，退出")

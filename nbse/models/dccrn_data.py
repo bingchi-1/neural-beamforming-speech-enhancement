@@ -192,12 +192,31 @@ class TorchDCCRN:
 
     与 `mask_mvdr.TorchMaskPredictor` 平行，但输出直接是波形
     （单通道增强不需要波束形成）。
+
+    **推理必须按训练时的序列长度切块**
+    ----------------------------------
+    LSTM 瓶颈对序列长度敏感。本模型训练时每个片段固定 1 秒（126 帧），
+    若推理时对整条 4 秒（501 帧）一次前向，结果会严重退化。
+
+    实测（120 条真实测试样本，同一个 checkpoint）：
+
+        整条 4 秒一次前向        SI-SDR −19.465   STOI 0.6508   优于输入 14/120
+        按 126 帧切块            SI-SDR  −9.506   STOI 0.6863   优于输入 80/120
+        时域切成 4 段各 1 秒      SI-SDR  −9.403   STOI 0.6819   优于输入 80/120
+
+    即**长度失配一项就值 10 dB**，而且训练过程中毫无迹象
+    （`history.jsonl` 里 val loss 从 0.000923 平稳降到 0.000597）。
+    因此 `chunk_frames` 默认从 checkpoint 里记录的 `segment_length` 推出，
+    而不是写死；缺该字段时退回 1 秒并给出显式警告。
     """
 
     def __init__(self, model, device: str = "cuda",
-                 deterministic: bool = True):
+                 deterministic: bool = True,
+                 chunk_frames: int | None = None):
         self.model = model
         self.device = device
+        # 训练时的帧数；None 表示不切块（整条一次前向，**不推荐**）
+        self.chunk_frames = chunk_frames
         if deterministic:
             from ..determinism import enable_determinism
 
@@ -205,7 +224,10 @@ class TorchDCCRN:
 
     @classmethod
     def from_checkpoint(cls, path: str | Path, device: str = "cuda",
-                        n_freqs: int | None = None, **kw) -> "TorchDCCRN":
+                        n_freqs: int | None = None,
+                        chunk_frames: int | None = None,
+                        strict_length: bool = True,
+                        **kw) -> "TorchDCCRN":
         import torch
 
         from .dccrn_lite import DCCRNLite
@@ -214,21 +236,58 @@ class TorchDCCRN:
         ckpt = torch.load(Path(path), map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model"])
         model.to(device).eval()
-        return cls(model, device)
 
-    def enhance(self, multi_ch: np.ndarray) -> np.ndarray:
-        """`[M, T]` 或 `[T]` → 增强波形 `[T]`（只用第一个通道）。"""
+        # 优先用调用方显式指定的；否则从 checkpoint 读训练片段长度。
+        # `save_checkpoint` 把额外字段嵌在 "extra" 下，故两处都查。
+        if chunk_frames is None:
+            seg = ckpt.get("segment_length") or (
+                ckpt.get("extra") or {}).get("segment_length")
+            if seg:
+                chunk_frames = _segment_frames(int(seg))
+            elif strict_length:
+                import warnings
+
+                warnings.warn(
+                    f"{path} 未记录训练片段长度（旧格式 checkpoint）。"
+                    f"按 1 秒（{_segment_frames(FS_DEFAULT)} 帧）推理。"
+                    f"若训练时用的不是 1 秒，结果会严重退化——"
+                    f"请用 --dccrn-chunk-frames 显式指定。",
+                    RuntimeWarning, stacklevel=2)
+                chunk_frames = _segment_frames(FS_DEFAULT)
+
+        return cls(model, device, chunk_frames=chunk_frames)
+
+    def _mask(self, X: np.ndarray):
+        """对复谱 `[F, T]` 求复数掩蔽。"""
         import torch
 
-        from ..dsp import istft
-
-        x = np.atleast_2d(multi_ch)[0].astype(np.float64)
-        X = stft(x, N_FFT, HOP, FS_DEFAULT)
         with torch.no_grad():
             t_r = torch.from_numpy(X.real.astype(np.float32))[None, None].to(self.device)
             t_i = torch.from_numpy(X.imag.astype(np.float32))[None, None].to(self.device)
             mr, mi = self.model(t_r, t_i)
-        mr = mr[0].float().cpu().numpy()
-        mi = mi[0].float().cpu().numpy()
+        return (mr[0].float().cpu().numpy(), mi[0].float().cpu().numpy())
+
+    def enhance(self, multi_ch: np.ndarray) -> np.ndarray:
+        """`[M, T]` 或 `[T]` → 增强波形 `[T]`（只用第一个通道）。"""
+        from ..dsp import istft
+
+        x = np.atleast_2d(multi_ch)[0].astype(np.float64)
+        X = stft(x, N_FFT, HOP, FS_DEFAULT)
+        T = X.shape[1]
+
+        if self.chunk_frames is None or T <= self.chunk_frames:
+            # 短于一个训练片段：直接整条前向（此时与训练条件一致）
+            mr, mi = self._mask(X)
+        else:
+            # 按训练片段长度切块。STFT 只做一次，唯一变量是模型输入长度；
+            # 不在时域切段是为了避免重复加窗带来的边界伪影
+            # （实测两种切法结果一致：−9.506 vs −9.403）。
+            mr = np.empty_like(X.real, dtype=np.float32)
+            mi = np.empty_like(X.imag, dtype=np.float32)
+            for s in range(0, T, self.chunk_frames):
+                e = min(s + self.chunk_frames, T)
+                r, i = self._mask(X[:, s:e])
+                mr[:, s:e], mi[:, s:e] = r, i
+
         enh = X * (mr + 1j * mi)
         return istft(enh, N_FFT, HOP, FS_DEFAULT, length=len(x))

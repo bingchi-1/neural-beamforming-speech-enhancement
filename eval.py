@@ -73,6 +73,10 @@ def main() -> int:
                          "给了它才会评测 DCCRN-lite（单通道对照）")
     ap.add_argument("--dccrn-base-channels", type=int, default=16,
                     help="DCCRN checkpoint 对应的 base_channels（须与训练时一致）")
+    ap.add_argument("--dccrn-chunk-frames", type=int, default=None,
+                    help="DCCRN 推理时的切块帧数。默认从 checkpoint 记录的"
+                         "训练片段长度推出；**不要轻易改成 0/不切块**——"
+                         "整条一次前向会让 SI-SDR 掉约 10 dB")
     ap.add_argument("--model", default="default",
                     help="checkpoint 对应的模型预设：default | small")
     ap.add_argument("--methods", default=None,
@@ -124,8 +128,10 @@ def main() -> int:
         enable_determinism()
         dccrn = TorchDCCRN.from_checkpoint(
             d_path, device=args.device, n_freqs=N_FFT // 2 + 1,
-            base_channels=args.dccrn_base_channels)
-        print(f"DCCRN-lite：{d_path}（设备 {args.device}）")
+            base_channels=args.dccrn_base_channels,
+            chunk_frames=args.dccrn_chunk_frames)
+        print(f"DCCRN-lite：{d_path}（设备 {args.device}，"
+              f"推理切块 {dccrn.chunk_frames} 帧）")
 
     if args.methods:
         methods = [m.strip() for m in args.methods.split(",") if m.strip()]
