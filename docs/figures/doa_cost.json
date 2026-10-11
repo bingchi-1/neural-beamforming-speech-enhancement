@@ -1,0 +1,47 @@
+{
+  "n": 120,
+  "doa_err_median_deg": 6.6159701085004095,
+  "doa_err_p90_deg": 116.21715562955335,
+  "doa_err_max_deg": 174.03942762390102,
+  "by_snr": {
+    "-5": {
+      "n": 40,
+      "doa_err_median": 54.79311208843778,
+      "sdr_oracle_mean": -4.647100889328902,
+      "sdr_est_mean": -11.703338131179374,
+      "stoi_oracle_mean": 0.7932648982677888,
+      "stoi_est_mean": 0.7228334282391542,
+      "pesq_oracle_mean": 1.188266822695732,
+      "pesq_est_mean": 1.1632569313049317
+    },
+    "+0": {
+      "n": 40,
+      "doa_err_median": 7.745109257629018,
+      "sdr_oracle_mean": -2.4306378340855352,
+      "sdr_est_mean": -7.467869083319258,
+      "stoi_oracle_mean": 0.8158693079729181,
+      "stoi_est_mean": 0.7784016468978275,
+      "pesq_oracle_mean": 1.2828308254480363,
+      "pesq_est_mean": 1.2541609823703765
+    },
+    "+5": {
+      "n": 40,
+      "doa_err_median": 3.952755469129997,
+      "sdr_oracle_mean": -1.3388907211896424,
+      "sdr_est_mean": -1.58523908514475,
+      "stoi_oracle_mean": 0.8308912427074086,
+      "stoi_est_mean": 0.8234647902646806,
+      "pesq_oracle_mean": 1.4035716950893402,
+      "pesq_est_mean": 1.3950938045978547
+    }
+  },
+  "overall": {
+    "sdr_oracle_mean": -2.80554314820136,
+    "sdr_est_mean": -6.91881543321446,
+    "stoi_oracle_mean": 0.8133418163160385,
+    "stoi_est_mean": 0.7748999551338874,
+    "pesq_oracle_mean": 1.2915564477443695,
+    "pesq_est_mean": 1.2708372394243876,
+    "corr_err_loss": 0.6916641724520756
+  }
+}
