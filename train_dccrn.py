@@ -185,6 +185,9 @@ def main() -> int:
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--no-deterministic", action="store_true")
     ap.add_argument("--early-stop-patience", type=int, default=None)
+    ap.add_argument("--resume", default=None,
+                    help="从 checkpoint 续训（例如 runs/dccrn/last.pt）。"
+                         "每个 epoch 都会写 last.pt，故中断后最多损失 1 个 epoch")
     ap.add_argument("--overfit", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
@@ -226,6 +229,15 @@ def main() -> int:
     scaler = torch.amp.GradScaler(device.type,
                                  enabled=bool(cfg.amp and device.type == "cuda"))
     state = TrainState()
+
+    if args.resume:
+        # 续训：把模型/优化器/调度器状态与已完成的 epoch 一起读回。
+        # 下面的训练循环从 state.epoch 起算，因此会**跳过**已跑完的 epoch。
+        state, _ = load_checkpoint(_resolve(args.resume), model, optimizer,
+                                    scheduler, map_location=device)
+        state.best_val = state.best_val if state.best_val else float("inf")
+        print(f"已从 {args.resume} 续训（epoch={state.epoch} "
+              f"step={state.global_step} 最优={state.best_val:.6f}）")
 
     print("=" * 74)
     print(f"设备      : {describe_device(device)}")
