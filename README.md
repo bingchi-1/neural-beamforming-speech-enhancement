@@ -1,141 +1,307 @@
 # neural-beamforming-speech-enhancement
 
-麦克风阵列语音增强基准：在仿真阵列数据上系统对比**传统波束形成**、**神经波束形成**与**单通道增强**三条路线。
+A reproducible benchmark for **microphone-array speech enhancement**, comparing three
+families on the same simulated array data: classical beamforming, neural beamforming,
+and single-channel enhancement.
 
-> **状态**：开发中（W3/6）。保底交付点（W2）已达成——`results/w2_baseline.csv`
-> 含 Noisy / DS / MVDR 三行结果；W3 的 CRN 模型、数据集封装与训练脚本已完成。
-> 结果表与图表将在 W6 补全。
+The point of the project is a controlled question: **how much does the array actually
+buy you, and how much does it cost to estimate direction-of-arrival (DOA) instead of
+knowing it?**
 
 ---
 
-## 对比方法
+## Headline results
 
-| 方法 | 是否需要训练 | 说明 |
+120 paired test utterances (20 utterances × 3 SNRs × 2 reverberation times),
+4-mic circular array (radius 4 cm) at 16 kHz.
+
+| Method | SI-SDR (dB) | STOI | PESQ-WB |
+|---|---|---|---|
+| Noisy (single channel) | −10.49 | 0.678 | 1.083 |
+| Delay-and-Sum (oracle DOA) | −7.86 | 0.719 | 1.107 |
+| MVDR (oracle DOA) | **−2.81** | **0.813** | **1.292** |
+| MVDR (GCC-PHAT DOA) | −6.92 | 0.775 | 1.271 |
+| mask-MVDR (oracle DOA) | −3.27 | 0.809 | 1.223 |
+| mask-MVDR (GCC-PHAT DOA) | −10.71 | 0.715 | 1.185 |
+| DCCRN-lite (single channel) | −9.51 | 0.691 | 1.191 |
+
+Reproduce with `python eval.py --data data/sim/test --ckpt runs/w4/best.pt --dccrn runs/dccrn/best.pt --out results/final.csv`.
+Metrics are computed with determinism enabled, so the table is bit-reproducible.
+
+**Three things this table says:**
+
+1. **The array is worth a lot.** The best array method beats single-channel `Noisy` by
+   **7.7 dB** SI-SDR, and beats the best single-channel neural method (`DCCRN-lite`) by
+   **16.7 dB**.
+2. **Estimating DOA is not free.** `MVDR` loses **4.1 dB** going from oracle DOA to
+   GCC-PHAT DOA. The figure below shows where that loss comes from.
+3. **Mask-based MVDR does not beat oracle-noise MVDR — and it should not.** This is
+   explained honestly in [Two results that did not go as planned](#two-results-that-did-not-go-as-planned).
+
+---
+
+## Where the DOA error hurts
+
+![DOA error and its cost](docs/figures/doa_cost.png)
+
+**(a)** GCC-PHAT is accurate when the input is clean and collapses at low SNR.
+**(b)** The resulting SI-SDR cost is negligible at high SNR and severe at low SNR.
+**(c)** There is a threshold effect: below roughly 10° of DOA error the cost is
+essentially zero; beyond it, the cost rises steeply.
+
+| Input SNR | Median DOA error | SI-SDR cost vs oracle |
 |---|---|---|
-| Noisy | — | 未处理基线（取单通道） |
-| Delay-and-Sum | 否 | 经典延时求和波束形成 |
-| MVDR (Oracle DOA) | 否 | 最小方差无畸变响应，使用真值方位角 |
-| MVDR (GCC-PHAT) | 否 | 使用 GCC-PHAT 估计的方位角 |
-| mask-MVDR (Oracle DOA) | 是 | 神经网络估计掩蔽驱动 MVDR |
-| mask-MVDR (GCC-PHAT) | 是 | 同上，使用估计方位角 |
-| DCCRN-lite | 是 | 单通道增强对照 |
+| +5 dB | 3.95° | **0.25 dB** |
+| 0 dB | 7.75° | 5.04 dB |
+| −5 dB | 54.79° | **7.06 dB** |
 
-`Oracle vs GCC-PHAT` 的成对对比，量化「DOA 估计误差带来多少性能损失」。
+Overall, `corr(DOA error, SI-SDR loss) = 0.69` across the 120 samples.
 
-## 评测指标
+Both `MVDR` variants share the *same* noise covariance (estimated from the ground-truth
+noise observation) and differ **only** in the DOA source, so the difference is a clean
+measurement of DOA estimation error alone.
 
-PESQ（宽带 16 kHz）、STOI、SI-SDR。评估条件：3 个 SNR 档（−5 / 0 / 5 dB）× 2 个 T60 档（0.3 s / 0.6 s）。
+## What a wrong DOA does to the beam pattern
 
-<!-- 结果表在此补全（W6） -->
+![Beampattern](docs/figures/beampattern.png)
 
----
-
-## 为什么使用仿真数据？
-
-本项目用 `pyroomacoustics`（镜像源法）仿真房间冲激响应，而非使用真实阵列录音。原因：
-
-1. **可控性**：声源方位角、混响时间 T60、信噪比均可精确设定，因此能做严格的消融实验——真实录音做不到这一点。
-2. **仿真 RIR 是波束形成领域的标准做法**，学术界在评估波束形成器性能时普遍采用。
-3. **参考信号可知**：评估 PESQ / STOI 需要干净参考信号，真实录音中该参考难以获得。
-
-（真实录音数据集如 CHiME、L3DAS 受限于数据规模与标注质量，不在本项目范围内。）
+The array is only 4 cm across, so at speech frequencies a delay-and-sum beamformer is
+nearly omnidirectional (grey). MVDR with the true DOA forms a real main lobe at the
+source direction (blue). With a DOA estimate that is off by 61°, the main lobe is
+**steered to the wrong place** (orange) — this is the mechanism behind the 7 dB cost at
+low SNR above.
 
 ---
 
-## 环境要求
+## Methods
 
-**GPU**：RTX 50 系（Blackwell，sm_120）需要 CUDA 12.8+ 构建的 PyTorch，且 `torch >= 2.7`。
+| Method | Trained? | Notes |
+|---|---|---|
+| Noisy | — | unprocessed single channel |
+| Delay-and-Sum | no | classical, steered by a known/estimated DOA |
+| MVDR | no | minimum variance distortionless response |
+| mask-MVDR | yes | MVDR weights from a mask-weighted spatial covariance |
+| DCCRN-lite | yes | complex-domain single-channel enhancement (control) |
+
+Each of the three DOA-dependent methods is evaluated in two variants — **oracle DOA**
+(true angle) and **GCC-PHAT DOA** (estimated from the observation) — so that the cost of
+DOA estimation can be isolated from the cost of everything else.
+
+**Metrics:** PESQ-WB, STOI, SI-SDR, on a paired grid of 3 SNRs (−5 / 0 / +5 dB) ×
+2 reverberation times (T60 0.3 / 0.6 s). All samples within a condition share the same
+room, source position, and noise realization, so comparisons are paired.
+
+> **Why is SI-SDR negative?** The reference is the *dry* (anechoic) source signal, so
+> reverberation counts as error — the metric reflects joint denoising and dereverberation.
+> Absolute values being low is expected and honest; the information is in the *differences*
+> between methods and in STOI/PESQ.
+
+---
+
+## Two results that did not go as planned
+
+Both are kept in the repository rather than hidden, because diagnosing them was more
+instructive than the parts that worked on the first try.
+
+### 1. mask-MVDR loses to MVDR (oracle DOA) — this is expected, not a bug
+
+The acceptance criterion originally written for this milestone was "mask-MVDR must beat
+MVDR". It cannot, and the reason is structural: `MVDR (oracle DOA)` estimates its noise
+covariance from the simulator's **ground-truth noise observation**, which amounts to
+knowing the noise field for free. An estimate-versus-truth comparison is not a fair
+fight, and no amount of tuning changes that.
+
+This was verified rather than assumed: 36 configurations were swept (mask exponent ×
+diagonal loading × MVDR/GEVD mode × whether the speech covariance is used). MVDR won
+in **9 out of 9** loadings, with a stable margin of −0.18 to −0.25 dB. Separately, the
+mask quality was shown to be near its ceiling — substituting the *ideal* ratio mask
+improves mask-MVDR by only 0.163 dB.
+
+The fair opponent is `MVDR (GCC-PHAT DOA)`, which estimates DOA from the observation
+too. That comparison is in the table above.
+
+### 2. DCCRN-lite was 10 dB worse than doing nothing — a train/inference length mismatch
+
+The first evaluation of DCCRN-lite produced SI-SDR **−19.47 dB**, against −10.49 dB for
+the unprocessed input: only 14 of 120 samples were improved. Training loss had looked
+perfectly healthy (validation loss fell smoothly from 0.000923 to 0.000597), so nothing
+pointed at the model itself.
+
+The cause was the **inference sequence length**. The model was trained on 1-second
+segments (126 STFT frames) but evaluated on full 4-second utterances (501 frames), and
+the LSTM bottleneck is sensitive to sequence length. Holding the checkpoint fixed and
+changing only how inference is chunked:
+
+| Inference strategy | SI-SDR median | SI-SDR mean | STOI median | Better than input |
+|---|---|---|---|---|
+| Whole 4 s in one forward pass | −18.73 | −19.47 | 0.651 | 14/120 |
+| Chunked to 126 frames | −9.06 | −9.51 | 0.686 | 80/120 |
+| Split into four 1 s pieces | −9.03 | −9.40 | 0.682 | 80/120 |
+
+The two chunking strategies agree closely, confirming the model was fine and the
+*length* was the problem — a **10 dB** effect with no trace in the training curves.
+
+Fixed by chunking inference to the training length. The training script now writes
+`segment_length` into the checkpoint, inference reads it back, and a checkpoint without
+that field raises a warning instead of silently using the wrong length.
+
+After the fix DCCRN-lite beats `Noisy` on all three metrics (PESQ 1.083 → 1.191,
+STOI 0.678 → 0.691, SI-SDR −10.49 → −9.51 dB).
+
+---
+
+## Why simulated data?
+
+Room impulse responses are simulated with `pyroomacoustics` (image-source method)
+rather than using real array recordings, because:
+
+1. **Controllability.** Source direction, T60, and SNR are all exactly known, which makes
+   strict ablations possible (oracle vs estimated DOA, per-condition breakdowns). Real
+   recordings do not allow this.
+2. **It is standard practice** in the beamforming literature.
+3. **A clean reference is required** to compute PESQ/STOI, and real recordings rarely
+   provide one.
+
+Real-recording datasets (CHiME, L3DAS) are out of scope.
+
+A subtlety worth noting: the dry reference is aligned to the array-center direct-path
+delay, recovered from the RIR peak tap. `pyroomacoustics` RIRs carry a
+distance-independent group delay of about 40 samples; if this is not removed, every
+metric is silently wrong. Noise is also propagated through the RIRs so that it forms a
+**spatially coherent** field — adding independent white noise per channel would make
+beamforming look artificially effective.
+
+---
+
+## Quick start
+
+**GPU note:** RTX 50-series (Blackwell, sm_120) needs a CUDA 12.8+ build of PyTorch and
+`torch >= 2.7`.
 
 ```bash
 pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
 pip install -r requirements.txt
+
+# verify GPU
+python -c "import torch; print(torch.version.cuda, torch.cuda.is_available())"   # -> 12.8 True
 ```
 
-验证 GPU 可用：
-
 ```bash
-python -c "import torch; print(torch.version.cuda, torch.cuda.is_available())"
-```
-
-应输出类似 `12.8 True`。若 `torch.version.cuda` 为 `None`，说明装成了 CPU 版。
-
----
-
-## 快速开始
-
-```bash
-# 1) 下载数据（约 950 MB，幂等，可重复执行；也可按 docs/DATASETS.md 手动放入）
+# 1) download corpora (~950 MB, idempotent)
 python scripts/download_data.py
 
-# 2) 生成多通道样本。--jobs 为渲染进程数（房间仿真各作业独立，可并行）
+# 2) generate multi-channel samples
 python scripts/generate_dataset.py --split train --n 3000 --jobs 8
 python scripts/generate_dataset.py --split val   --n 120  --jobs 8
 
-# 3) 生成配对评估网格（3 档 SNR × 2 档 T60，同语料同房间同噪声）
+# 3) paired evaluation grid (same utterances, rooms and noise across conditions)
 python scripts/generate_dataset.py --split test --grid --n-utterances 20 \
     --snr -5 0 5 --t60 0.3 0.6 --jobs 8
 
-# 4) 训练
-python train.py --data data/sim/train --val data/sim/val
+# 4) train
+python train.py        --data data/sim/train --val data/sim/val          # mask predictor
+python train_dccrn.py  --data data/sim/train --val data/sim/val          # single-channel
 
-# 5) 评测，产出结果表
-python eval.py --data data/sim/test --out results/w2_baseline.csv
+# 5) evaluate -> results table
+python eval.py --data data/sim/test \
+    --ckpt runs/w4/best.pt --dccrn runs/dccrn/best.pt --out results/final.csv
+
+# 6) regenerate figures
+python scripts/make_figures.py all
+
+# tests (265 of them)
+python -m pytest tests/ -q
 ```
 
-### 数据生成的性能
+Smoke-test the whole evaluation in seconds with `--limit 2`.
 
-生成是仿真是 CPU 瓶颈，实测（RTX 5070 Ti Laptop + Intel Ultra 7 255HX，20 逻辑核）：
+### Data generation throughput
 
-| 配置 | 吞吐 | 说明 |
+Room simulation is CPU-bound. Measured on an RTX 5070 Ti Laptop + Intel Ultra 7 255HX
+(20 logical cores):
+
+| Configuration | Throughput | |
 |---|---|---|
-| 默认 | ~27 条/秒 | `max_order_cap: 30` + `--jobs 8` |
-| 串行 | ~6–7 条/秒 | 同口径但 `--jobs 1`，慢 3.8× |
-| 完整仿真 | — | `max_order_cap: null`，最差房间 2.1 s/条 |
+| default | ~27 samples/s | `max_order_cap: 30` + `--jobs 8` |
+| serial | ~6–7 samples/s | same, `--jobs 1` — 3.8× slower |
+| full simulation | — | `max_order_cap: null`, 2.1 s/sample worst case |
 
-两项优化互不冲突，合计比最初的完整仿真 + 串行快约 15–20 倍：
+Two independent optimizations, together roughly 15–20× faster than full simulation run
+serially:
 
-- **`--jobs N`**：房间仿真各作业独立，用进程池并行。实测 8 进程加速 3.81×
-  （两侧同样冷启动、同样工作量）。作业列表仍在主进程按同一种子生成、结果按序
-  回收，因此产出与串行**逐位一致**（有回归测试保证）。
-- **`room.max_order_cap: 30`**：由 `inverse_sabine` 反推的镜像源阶数随「大房间 +
-  长 T60」急剧上升（实测中位 52、最大 114），而计算量随阶数超线性增长（阶数与
-  耗时相关系数 0.927）。但高阶层镜像源能量可忽略——上限 30 时 RIR 能量保留
-  99.94%、相对误差 1.9%，且 SNR 标定、通道相关度、DRR 三项下游口径均无变化。
+- **`--jobs N`** parallelizes room rendering across processes (8 workers → 3.81×).
+  The job list is still generated in the parent process from one seed and results are
+  collected in order, so output is **bit-identical** to the serial path (regression-tested).
+- **`room.max_order_cap: 30`** caps the image-source order, which `inverse_sabine`
+  drives steeply upward for large rooms with long T60 (median 52, max 114 measured),
+  while cost grows super-linearly in order (correlation 0.927). High-order images carry
+  negligible energy: at a cap of 30 the RIR retains 99.94% of its energy with 1.9%
+  relative error, and SNR calibration, inter-channel coherence, and DRR are all unchanged.
 
-> 注意 `max_order_cap` 已计入 RIR 缓存文件名。改这个值会让旧缓存自动失效，
-> 避免新旧口径的 RIR 混在同一批数据里而静默失真。
-
----
-
-## 仓库结构
-
-```
-nbse/                 源码（入库）
-  data/               房间仿真、语料读取、批量生成（不依赖 torch）
-  beamformers/        传统波束形成（DS / MVDR）+ 几何
-  models/             CRN 网络、数据集封装（PyTorch 依赖隔离在此）
-  metrics/            PESQ / STOI / SI-SDR 封装
-  dsp.py              STFT / ISTFT
-  evaluate.py         评测逻辑
-  training.py         训练循环、损失、checkpoint
-configs/default.yaml  全部仿真与训练参数
-scripts/              数据下载、样本生成、诊断脚本
-tests/                单元测试
-train.py              训练入口
-eval.py               评测入口，产出结果表
-results/              结果表（入库）
-data/                 下载的数据集与生成样本（不入库）
-rirs/                 RIR 缓存（不入库）
-runs/                 训练产物（不入库）
-```
+> The cap is part of the RIR cache filename, so changing it invalidates stale caches
+> instead of silently mixing RIRs computed under different settings.
 
 ---
 
-## 设计文档
+## Repository layout
 
-- 设计：`docs/superpowers/specs/2026-10-09-neural-beamforming-design.md`
-- 实施计划：`docs/superpowers/plans/2026-10-09-neural-beamforming-plan.md`
+```
+nbse/                  source (tracked)
+  data/                room simulation, corpus loading, batch generation (no torch)
+  beamformers/         DS / MVDR / mask-MVDR / GCC-PHAT DOA + geometry
+  models/              CRN, DCCRN-lite, dataset wrappers (torch isolated here)
+  metrics/             PESQ / STOI / SI-SDR
+  dsp.py               STFT / ISTFT
+  evaluate.py          evaluation logic
+  training.py          training loop, losses, checkpointing
+  determinism.py       bit-reproducible evaluation
+configs/default.yaml   all simulation and training parameters
+scripts/               data download, sample generation, figures
+tests/                 265 tests
+train.py               multi-channel CRN training entry point
+train_dccrn.py         single-channel DCCRN-lite training entry point
+eval.py                evaluation entry point -> results tables
+results/               result tables (tracked)
+docs/figures/          figures (tracked)
+data/  rirs/  runs/    datasets, RIR cache, training artifacts (not tracked)
+```
 
-## 许可
+---
+
+## Engineering notes
+
+**Reproducibility.** GPU evaluation is bit-reproducible only with determinism explicitly
+enabled: with default cuDNN, eight consecutive forward passes on the same input produced
+eight different outputs (max diff 1.6e-05), which after covariance estimation and matrix
+inversion became a **0.78 relative difference in beamforming weights** — enough to flip
+the conclusion of a comparison. `nbse/determinism.py` enables
+`torch.use_deterministic_algorithms` plus deterministic cuDNN at a cost of about 7%
+(1.5 → 1.6 ms/batch) and is on by default for evaluation.
+
+**A silent failure mode worth knowing about.** When an `nn.Module` is constructed lazily
+during the first forward pass and the optimizer was built earlier, its parameters never
+enter `optimizer.param_groups` — they stay at their initial values **with no error
+raised**. DCCRN-lite's LSTM bottleneck has an input size that depends on the input shape,
+so it is built in `__init__` via a dummy forward, and a test asserts that the optimizer
+covers every parameter.
+
+**Measurements are pipelined, not guessed at.** Two of the bugs found in the GCC-PHAT
+implementation were sign errors invisible in the output statistics: the cross-correlation
+product was written in the wrong order (recovering `r[−k]`, so a true lag of −3.7 samples
+was reported as +3.72), and the FFT length was taken as `≥2N` instead of `≥2N−1`, which
+wraps the tail of the linear correlation onto the front and produced spurious peaks (a
+16-sample delay reported as −0.94). Both were pinned down by comparing against an
+independent implementation rather than by reasoning. PHAT whitening must also be
+band-limited: whitening across the full 0–8 kHz range where speech has no energy let
+noise dominate the correlation, degrading median DOA error from 7.1° to 61.5°.
+
+---
+
+## Documentation
+
+- Design: `docs/superpowers/specs/2026-10-09-neural-beamforming-design.md`
+- Implementation plan: `docs/superpowers/plans/2026-10-09-neural-beamforming-plan.md`
+
+## License
 
 MIT
