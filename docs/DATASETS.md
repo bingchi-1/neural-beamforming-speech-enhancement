@@ -72,4 +72,4 @@ neural-beamforming-speech-enhancement/
 降至 −15 ~ −5 dB，静态噪声假设不成立。
 
 选用 DEMAND 还有一个理由：VoiceBank-DEMAND 这一经典语音增强基准的噪声就取自该库，
-属于领域标准做法，便于在面试中论证。
+属于领域标准做法，便于与既有文献直接对比。

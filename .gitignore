@@ -25,3 +25,7 @@ venv/
 .DS_Store
 .idea/
 .vscode/
+
+# 内部工作笔记（设计草稿与计划），属本地资料，不入库。
+# 文件保留在磁盘上，只是不进入版本控制。
+/docs/superpowers/

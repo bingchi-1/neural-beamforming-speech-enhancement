@@ -390,7 +390,7 @@ def CRN_SMALL(**kwargs) -> CRN:
 
 if __name__ == "__main__":                                     # pragma: no cover
     # 直接运行本文件即可做形状与规模自检（不依赖 pytest）：
-    #   D:\Anaconda_envs\envs\pytorch\python.exe -m nbse.models.crn
+    #   python -m nbse.models.crn
     torch.manual_seed(0)
 
     print("=" * 68)
